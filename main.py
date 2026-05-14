@@ -15,7 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from routers import bist, kripto, altin, doviz, abd, evren
+from routers import bist, kripto, altin, doviz, abd, evren, gumus
 
 # ─── Ortam değişkenleri ────────────────────────────────────────────────────────
 _raw_keys = os.getenv("API_KEYS", "")
@@ -108,6 +108,7 @@ app.include_router(altin.router)
 app.include_router(doviz.router)
 app.include_router(abd.router)
 app.include_router(evren.router)
+app.include_router(gumus.router)
 
 
 # ─── Genel Endpoints ──────────────────────────────────────────────────────────

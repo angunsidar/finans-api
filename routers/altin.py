@@ -89,6 +89,7 @@ def altin_tl():
             "usd_try": usdtry,
             "altin_tl_ons": ons_fiyat_tl,
             "altin_tl_gram": gram_fiyat_tl,
+            "altin_22ayar_gram": round(gram_fiyat_tl * 0.916, 2),
             "not": "GC=F futures × USDTRY=X kuru ile hesaplanmıştır",
             "tarih": gold["tarih"],
         }
