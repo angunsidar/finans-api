@@ -1,6 +1,6 @@
 """
 Gümüş fiyatı endpoint'leri.
-yfinance üzerinden — spot ve ETF.
+yfinance üzerinden — spot (XAG=X) ve SLV ETF.
 """
 from __future__ import annotations
 
@@ -9,10 +9,9 @@ from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/gumus", tags=["gümüş"])
 
-# Kaynak tanımları
 KAYNAKLAR = {
-    "spot":    "XAG=X",
-    "etf_slv": "SLV",
+    "spot": {"sembol": "XAG=X", "ad": "Gümüş Spot (XAG/USD)", "para": "USD", "birim": "ons"},
+    "etf_slv": {"sembol": "SLV", "ad": "iShares Silver ETF", "para": "USD", "birim": "hisse"},
 }
 
 
@@ -42,12 +41,12 @@ def _fetch(sembol: str) -> dict:
 def gumus_ozet():
     """Spot ve ETF gümüş fiyatlarını tek sorguda getir."""
     sonuclar = {}
-    for key, sembol in KAYNAKLAR.items():
+    for key, meta in KAYNAKLAR.items():
         try:
-            veri = _fetch(sembol)
-            sonuclar[key] = veri
+            veri = _fetch(meta["sembol"])
+            sonuclar[key] = {**meta, **veri}
         except Exception as e:
-            sonuclar[key] = {"hata": str(e)[:60]}
+            sonuclar[key] = {**meta, "hata": str(e)[:60]}
     return sonuclar
 
 
@@ -61,16 +60,16 @@ def gumus_tl():
         silver = _fetch("XAG=X")
         usd = _fetch("USDTRY=X")
 
-        xag_usd = silver["fiyat"]
+        ons_fiyat_usd = silver["fiyat"]
         usdtry = usd["fiyat"]
-        gumus_tl_ons = round(xag_usd * usdtry, 2)
-        gumus_tl_gram = round((xag_usd * usdtry) / 31.1035, 2)  # 1 troy ons = 31.1035 gram
+        ons_fiyat_tl = round(ons_fiyat_usd * usdtry, 2)
+        gram_fiyat_tl = round(ons_fiyat_tl / 31.1035, 2)
 
         return {
-            "gumus_usd_ons": xag_usd,
+            "gumus_usd_ons": ons_fiyat_usd,
             "usd_try": usdtry,
-            "gumus_tl_ons": gumus_tl_ons,
-            "gumus_tl_gram": gumus_tl_gram,
+            "gumus_tl_ons": ons_fiyat_tl,
+            "gumus_tl_gram": gram_fiyat_tl,
             "degisim_yuzde": silver["degisim_yuzde"],
             "not": "XAG=X spot × USDTRY=X kuru ile hesaplanmıştır",
             "tarih": silver["tarih"],
@@ -85,11 +84,11 @@ def gumus_tl():
 def gumus_gecmis(
     period: str = Query("1mo", description="1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y",
                         pattern="^(1d|5d|1mo|3mo|6mo|1y|2y|5y)$"),
-    aralik: str = Query("1d", description="1d, 1wk, 1mo"),
+    aralik: str = Query("1d", description="1d, 1wk, 1mo",
+                        pattern="^(1d|1wk|1mo)$"),
 ):
-    """Geçmiş gümüş fiyat verisi (OHLCV)."""
-    sembol = "XAG=X"
-    tick = yf.Ticker(sembol)
+    """Geçmiş gümüş fiyat verisi (OHLCV) — XAG=X."""
+    tick = yf.Ticker("XAG=X")
     hist = tick.history(period=period, interval=aralik)
     if hist.empty:
         raise HTTPException(404, "Veri bulunamadı")
@@ -100,13 +99,8 @@ def gumus_gecmis(
             "yuksek": round(float(row["High"]), 4),
             "dusuk": round(float(row["Low"]), 4),
             "kapanis": round(float(row["Close"]), 4),
-            "hacim": int(row["Volume"]),
+            "hacim": int(row["Volume"]) if row["Volume"] == row["Volume"] else 0,
         }
         for idx, row in hist.iterrows()
     ]
-    return {
-        "kaynak": sembol,
-        "period": period,
-        "aralik": aralik,
-        "veri": kayitlar,
-    }
+    return {"kaynak": "XAG=X", "period": period, "aralik": aralik, "veri": kayitlar}
