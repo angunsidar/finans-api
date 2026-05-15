@@ -4,6 +4,7 @@ yfinance üzerinden — futures, ETF ve BIST altın.
 """
 from __future__ import annotations
 
+import traceback
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
 
@@ -96,7 +97,7 @@ def altin_tl():
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, detail={"error": str(e), "trace": traceback.format_exc()[-500:]})
 
 
 @router.get("/gecmis", summary="Geçmiş altın fiyatları")

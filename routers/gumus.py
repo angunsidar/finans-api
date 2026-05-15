@@ -4,6 +4,7 @@ yfinance üzerinden — spot (XAG=X) ve SLV ETF.
 """
 from __future__ import annotations
 
+import traceback
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
 
@@ -77,7 +78,7 @@ def gumus_tl():
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(500, detail={"error": str(e), "trace": traceback.format_exc()[-500:]})
 
 
 @router.get("/gecmis", summary="Geçmiş gümüş fiyatları")
