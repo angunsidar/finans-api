@@ -1,10 +1,14 @@
 name: Keep API Alive
 
+# ⚠️  Bu workflow devre dışı bırakıldı.
+# Private repo'da 2.000 dk/ay limiti aşılıyor (8.640 dk/ay harcıyor).
+# Bunun yerine UptimeRobot ücretsiz monitör kullan:
+#   → https://uptimerobot.com
+#   → URL: https://finans-api-ztnv.onrender.com/health
+#   → Interval: 5 minutes
+
 on:
-  schedule:
-    # Her 5 dakikada bir çalışır (Render 15 dk'da uyutur, 5 dk yeterli)
-    - cron: '*/5 * * * *'
-  workflow_dispatch: # Manuel tetikleme için
+  workflow_dispatch: # Sadece manuel tetikleme — otomatik schedule kaldırıldı
 
 jobs:
   ping:
