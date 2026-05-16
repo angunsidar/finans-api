@@ -1,9 +1,11 @@
 """
 Altın fiyatı endpoint'leri.
 yfinance üzerinden — futures, ETF ve BIST altın.
+Rate-limit koruması: 5 dakika TTL cache.
 """
 from __future__ import annotations
 
+import time
 import traceback
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
@@ -18,8 +20,28 @@ KAYNAKLAR = {
     "bist":    {"sembol": "GLDTR.IS",  "ad": "Altın (BIST)",            "para": "TRY", "birim": "gram"},
 }
 
+# ── Basit TTL cache (5 dk = 300 sn) ──────────────────────────────────────────
+_cache: dict[str, tuple[float, dict]] = {}
+_CACHE_TTL = 300  # saniye
+
+
+def _cache_get(key: str):
+    if key in _cache:
+        ts, val = _cache[key]
+        if time.time() - ts < _CACHE_TTL:
+            return val
+    return None
+
+
+def _cache_set(key: str, val: dict):
+    _cache[key] = (time.time(), val)
+
 
 def _fetch(sembol: str) -> dict:
+    cached = _cache_get(sembol)
+    if cached:
+        return cached
+
     tick = yf.Ticker(sembol)
     hist = tick.history(period="2d")
     if hist.empty:
@@ -30,7 +52,7 @@ def _fetch(sembol: str) -> dict:
     onceki_kapanis = float(onceki["Close"])
     degisim = round(kapanis - onceki_kapanis, 4)
     degisim_yuzde = round((degisim / onceki_kapanis) * 100, 2) if onceki_kapanis else 0
-    return {
+    result = {
         "fiyat": kapanis,
         "acilis": round(float(son["Open"]), 4),
         "yuksek": round(float(son["High"]), 4),
@@ -39,6 +61,8 @@ def _fetch(sembol: str) -> dict:
         "degisim_yuzde": degisim_yuzde,
         "tarih": str(hist.index[-1].date()),
     }
+    _cache_set(sembol, result)
+    return result
 
 
 @router.get("", summary="Tüm altın kaynakları özet")
