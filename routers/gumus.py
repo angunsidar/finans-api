@@ -1,7 +1,7 @@
 """
 Gümüş fiyatı endpoint'leri.
-yfinance üzerinden — spot (XAG=X) ve SLV ETF.
-Rate-limit koruması: 5 dakika TTL cache + CoinGecko fallback.
+Kaynak zinciri: yfinance XAG=X → Coinbase XAG-USD → CoinGecko kinesis-silver
+5 dakika TTL cache ile rate-limit koruması.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ KAYNAKLAR = {
     "etf_slv": {"sembol": "SLV",   "ad": "iShares Silver ETF",    "para": "USD", "birim": "hisse"},
 }
 
-# ── Basit TTL cache (5 dk = 300 sn) ──────────────────────────────────────────
+# ── 5 dk TTL cache ────────────────────────────────────────────────────────────
 _cache: dict[str, tuple[float, dict]] = {}
 _CACHE_TTL = 300  # saniye
 
@@ -35,16 +35,15 @@ def _cache_set(key: str, val: dict):
     _cache[key] = (time.time(), val)
 
 
-# ── yfinance ile veri çek ─────────────────────────────────────────────────────
-def _fetch(sembol: str) -> dict:
+# ── yfinance ─────────────────────────────────────────────────────────────────
+def _fetch_yf(sembol: str) -> dict:
     cached = _cache_get(sembol)
     if cached:
         return cached
-
     tick = yf.Ticker(sembol)
     hist = tick.history(period="2d")
     if hist.empty:
-        raise HTTPException(404, f"Veri bulunamadı: {sembol}")
+        raise ValueError(f"Veri bulunamadı: {sembol}")
     son = hist.iloc[-1]
     onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
     kapanis = round(float(son["Close"]), 4)
@@ -64,34 +63,34 @@ def _fetch(sembol: str) -> dict:
     return result
 
 
-# ── Fallback 1: metals.live (ücretsiz, auth yok) ─────────────────────────────
-def _metalslive_silver_usd() -> float | None:
-    """metals.live ücretsiz API — spot silver USD/ons."""
-    cached = _cache_get("__ml_silver__")
+# ── Coinbase fallback (XAG-USD ve XAG-TRY — auth yok) ────────────────────────
+def _coinbase_xag() -> dict | None:
+    """Coinbase'den XAG-USD ve XAG-TRY fiyatı çeker."""
+    cached = _cache_get("__cb_xag__")
     if cached:
-        return cached.get("usd_ons")
+        return cached
     try:
-        resp = requests.get("https://metals.live/api/v1/spot", timeout=8)
-        if resp.status_code == 200:
-            data = resp.json()
-            # [{silver: 32.5, gold: 3200, ...}] formatında gelir
-            if isinstance(data, list) and data:
-                usd_ons = data[0].get("silver")
-            elif isinstance(data, dict):
-                usd_ons = data.get("silver")
-            else:
-                usd_ons = None
-            if usd_ons:
-                _cache_set("__ml_silver__", {"usd_ons": float(usd_ons)})
-                return float(usd_ons)
+        r_usd = requests.get(
+            "https://api.coinbase.com/v2/prices/XAG-USD/spot", timeout=8
+        )
+        r_try = requests.get(
+            "https://api.coinbase.com/v2/prices/XAG-TRY/spot", timeout=8
+        )
+        if r_usd.status_code == 200 and r_try.status_code == 200:
+            usd_ons = float(r_usd.json()["data"]["amount"])
+            try_ons = float(r_try.json()["data"]["amount"])
+            if usd_ons > 0 and try_ons > 0:
+                result = {"usd_ons": usd_ons, "try_ons": try_ons}
+                _cache_set("__cb_xag__", result)
+                return result
     except Exception:
         pass
     return None
 
 
-# ── Fallback 2: CoinGecko kinesis-silver (KXAG token, silver-backed) ─────────
+# ── CoinGecko kinesis-silver fallback ────────────────────────────────────────
 def _coingecko_silver_usd() -> float | None:
-    """CoinGecko'dan gümüş TRY/ons — kinesis-silver (KXAG) token ile."""
+    """CoinGecko kinesis-silver (KXAG) token — USD/ons proxy."""
     cached = _cache_get("__cg_silver__")
     if cached:
         return cached.get("usd_ons")
@@ -103,7 +102,6 @@ def _coingecko_silver_usd() -> float | None:
         )
         if resp.status_code == 200:
             d = resp.json()
-            # kinesis-silver fiyatı USD/ons cinsinden gelir
             usd_ons = d.get("kinesis-silver", {}).get("usd")
             if usd_ons:
                 _cache_set("__cg_silver__", {"usd_ons": float(usd_ons)})
@@ -113,10 +111,10 @@ def _coingecko_silver_usd() -> float | None:
     return None
 
 
+# ── USDTRY yardımcısı ─────────────────────────────────────────────────────────
 def _usdtry_rate() -> float:
-    """USDTRY kurunu döndür — önce cache, sonra yfinance, sonra sabit fallback."""
     try:
-        return _fetch("USDTRY=X")["fiyat"]
+        return _fetch_yf("USDTRY=X")["fiyat"]
     except Exception:
         return 0.0
 
@@ -125,11 +123,10 @@ def _usdtry_rate() -> float:
 
 @router.get("", summary="Tüm gümüş kaynakları özet")
 def gumus_ozet():
-    """Spot ve ETF gümüş fiyatlarını tek sorguda getir."""
     sonuclar = {}
     for key, meta in KAYNAKLAR.items():
         try:
-            veri = _fetch(meta["sembol"])
+            veri = _fetch_yf(meta["sembol"])
             sonuclar[key] = {**meta, **veri}
         except Exception as e:
             sonuclar[key] = {**meta, "hata": str(e)[:80]}
@@ -141,56 +138,60 @@ def gumus_tl():
     """
     Gümüş USD/ons fiyatı × Dolar/TL kuru = TL/ons.
     Gram hesabı için 31.1035'e bölünür.
-    Önce yfinance (XAG=X), rate-limit'te CoinGecko'ya düşer.
+    Kaynak zinciri: yfinance → Coinbase → CoinGecko kinesis-silver.
     """
     try:
-        ons_fiyat_usd: float | None = None
+        ons_usd: float | None = None
+        ons_tl: float | None = None
         degisim_yuzde: float = 0.0
         tarih: str = ""
-        kaynak_notu: str = ""
+        kaynak: str = ""
 
-        # 1. yfinance dene
+        # 1. yfinance XAG=X
         try:
-            silver = _fetch("XAG=X")
-            ons_fiyat_usd = silver["fiyat"]
+            silver = _fetch_yf("XAG=X")
+            usd    = _fetch_yf("USDTRY=X")
+            ons_usd = silver["fiyat"]
+            ons_tl  = round(ons_usd * usd["fiyat"], 2)
             degisim_yuzde = silver["degisim_yuzde"]
-            tarih = silver["tarih"]
-            kaynak_notu = "XAG=X spot × USDTRY=X kuru ile hesaplanmıştır"
+            tarih   = silver["tarih"]
+            kaynak  = "yfinance XAG=X × USDTRY=X"
         except Exception:
             pass
 
-        # 2. metals.live fallback
-        if ons_fiyat_usd is None:
-            ons_fiyat_usd = _metalslive_silver_usd()
-            if ons_fiyat_usd:
-                kaynak_notu = "metals.live spot × USDTRY=X kuru ile hesaplanmıştır (fallback)"
-                tarih = ""
+        # 2. Coinbase XAG-USD + XAG-TRY (TRY direkt geliyor)
+        if ons_usd is None:
+            cb = _coinbase_xag()
+            if cb:
+                ons_usd = cb["usd_ons"]
+                ons_tl  = round(cb["try_ons"], 2)
+                kaynak  = "Coinbase XAG-USD / XAG-TRY (fallback)"
 
-        # 3. CoinGecko kinesis-silver fallback
-        if ons_fiyat_usd is None:
-            ons_fiyat_usd = _coingecko_silver_usd()
-            if ons_fiyat_usd:
-                kaynak_notu = "CoinGecko kinesis-silver × USDTRY=X kuru ile hesaplanmıştır (fallback)"
-                tarih = ""
+        # 3. CoinGecko kinesis-silver + yfinance USDTRY
+        if ons_usd is None:
+            cg_usd = _coingecko_silver_usd()
+            if cg_usd:
+                ons_usd = cg_usd
+                usdtry  = _usdtry_rate()
+                if usdtry > 0:
+                    ons_tl = round(ons_usd * usdtry, 2)
+                kaynak = "CoinGecko kinesis-silver (fallback)"
 
-        if ons_fiyat_usd is None or ons_fiyat_usd == 0:
+        if ons_usd is None or ons_usd == 0:
             raise HTTPException(503, "Gümüş verisi alınamadı — tüm kaynaklar başarısız")
-
-        # 3. USDTRY kuru
-        usdtry = _usdtry_rate()
-        if usdtry == 0:
+        if ons_tl is None or ons_tl == 0:
             raise HTTPException(503, "USDTRY kuru alınamadı")
 
-        ons_fiyat_tl = round(ons_fiyat_usd * usdtry, 2)
-        gram_fiyat_tl = round(ons_fiyat_tl / 31.1035, 2)
+        gram_tl = round(ons_tl / 31.1035, 2)
+        usdtry_hesap = round(ons_tl / ons_usd, 4) if ons_usd else 0
 
         return {
-            "gumus_usd_ons": round(ons_fiyat_usd, 4),
-            "usd_try": usdtry,
-            "gumus_tl_ons": ons_fiyat_tl,
-            "gumus_tl_gram": gram_fiyat_tl,
+            "gumus_usd_ons": round(ons_usd, 4),
+            "usd_try": usdtry_hesap,
+            "gumus_tl_ons": ons_tl,
+            "gumus_tl_gram": gram_tl,
             "degisim_yuzde": degisim_yuzde,
-            "not": kaynak_notu,
+            "not": f"{kaynak} ile hesaplanmıştır",
             "tarih": tarih,
         }
 
