@@ -18,9 +18,14 @@ KAYNAKLAR = {
     "etf_slv": {"sembol": "SLV",   "ad": "iShares Silver ETF",    "para": "USD", "birim": "hisse"},
 }
 
+_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; FinansAPI/1.0)",
+    "Accept": "application/json",
+}
+
 # ── 5 dk TTL cache ────────────────────────────────────────────────────────────
 _cache: dict[str, tuple[float, dict]] = {}
-_CACHE_TTL = 300  # saniye
+_CACHE_TTL = 300
 
 
 def _cache_get(key: str):
@@ -63,18 +68,20 @@ def _fetch_yf(sembol: str) -> dict:
     return result
 
 
-# ── Coinbase fallback (XAG-USD ve XAG-TRY — auth yok) ────────────────────────
-def _coinbase_xag() -> dict | None:
-    """Coinbase'den XAG-USD ve XAG-TRY fiyatı çeker."""
+# ── Coinbase fallback ─────────────────────────────────────────────────────────
+def _coinbase_xag() -> tuple[dict | None, str]:
+    """Coinbase XAG-USD ve XAG-TRY — (sonuç, hata_mesajı)"""
     cached = _cache_get("__cb_xag__")
     if cached:
-        return cached
+        return cached, ""
     try:
         r_usd = requests.get(
-            "https://api.coinbase.com/v2/prices/XAG-USD/spot", timeout=8
+            "https://api.coinbase.com/v2/prices/XAG-USD/spot",
+            headers=_HEADERS, timeout=8,
         )
         r_try = requests.get(
-            "https://api.coinbase.com/v2/prices/XAG-TRY/spot", timeout=8
+            "https://api.coinbase.com/v2/prices/XAG-TRY/spot",
+            headers=_HEADERS, timeout=8,
         )
         if r_usd.status_code == 200 and r_try.status_code == 200:
             usd_ons = float(r_usd.json()["data"]["amount"])
@@ -82,22 +89,23 @@ def _coinbase_xag() -> dict | None:
             if usd_ons > 0 and try_ons > 0:
                 result = {"usd_ons": usd_ons, "try_ons": try_ons}
                 _cache_set("__cb_xag__", result)
-                return result
-    except Exception:
-        pass
-    return None
+                return result, ""
+        return None, f"Coinbase HTTP {r_usd.status_code}/{r_try.status_code}"
+    except Exception as e:
+        return None, f"Coinbase: {e}"
 
 
 # ── CoinGecko kinesis-silver fallback ────────────────────────────────────────
-def _coingecko_silver_usd() -> float | None:
-    """CoinGecko kinesis-silver (KXAG) token — USD/ons proxy."""
+def _coingecko_silver_usd() -> tuple[float | None, str]:
+    """CoinGecko kinesis-silver — (usd_ons, hata_mesajı)"""
     cached = _cache_get("__cg_silver__")
     if cached:
-        return cached.get("usd_ons")
+        return cached.get("usd_ons"), ""
     try:
         resp = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
             params={"ids": "kinesis-silver", "vs_currencies": "usd"},
+            headers=_HEADERS,
             timeout=8,
         )
         if resp.status_code == 200:
@@ -105,13 +113,13 @@ def _coingecko_silver_usd() -> float | None:
             usd_ons = d.get("kinesis-silver", {}).get("usd")
             if usd_ons:
                 _cache_set("__cg_silver__", {"usd_ons": float(usd_ons)})
-                return float(usd_ons)
-    except Exception:
-        pass
-    return None
+                return float(usd_ons), ""
+            return None, f"CoinGecko boş yanıt: {d}"
+        return None, f"CoinGecko HTTP {resp.status_code}: {resp.text[:100]}"
+    except Exception as e:
+        return None, f"CoinGecko: {e}"
 
 
-# ── USDTRY yardımcısı ─────────────────────────────────────────────────────────
 def _usdtry_rate() -> float:
     try:
         return _fetch_yf("USDTRY=X")["fiyat"]
@@ -136,9 +144,7 @@ def gumus_ozet():
 @router.get("/tl", summary="Gümüş TL karşılığı (hesaplanmış)")
 def gumus_tl():
     """
-    Gümüş USD/ons fiyatı × Dolar/TL kuru = TL/ons.
-    Gram hesabı için 31.1035'e bölünür.
-    Kaynak zinciri: yfinance → Coinbase → CoinGecko kinesis-silver.
+    Kaynak zinciri: yfinance XAG=X → Coinbase XAG-USD/TRY → CoinGecko kinesis-silver
     """
     try:
         ons_usd: float | None = None
@@ -146,6 +152,7 @@ def gumus_tl():
         degisim_yuzde: float = 0.0
         tarih: str = ""
         kaynak: str = ""
+        hatalar: list[str] = []
 
         # 1. yfinance XAG=X
         try:
@@ -156,31 +163,41 @@ def gumus_tl():
             degisim_yuzde = silver["degisim_yuzde"]
             tarih   = silver["tarih"]
             kaynak  = "yfinance XAG=X × USDTRY=X"
-        except Exception:
-            pass
+        except Exception as e:
+            hatalar.append(f"yfinance: {e}")
 
-        # 2. Coinbase XAG-USD + XAG-TRY (TRY direkt geliyor)
+        # 2. Coinbase XAG-USD + XAG-TRY
         if ons_usd is None:
-            cb = _coinbase_xag()
+            cb, cb_err = _coinbase_xag()
             if cb:
                 ons_usd = cb["usd_ons"]
                 ons_tl  = round(cb["try_ons"], 2)
-                kaynak  = "Coinbase XAG-USD / XAG-TRY (fallback)"
+                kaynak  = "Coinbase XAG-USD/TRY"
+            else:
+                hatalar.append(cb_err)
 
-        # 3. CoinGecko kinesis-silver + yfinance USDTRY
+        # 3. CoinGecko kinesis-silver
         if ons_usd is None:
-            cg_usd = _coingecko_silver_usd()
+            cg_usd, cg_err = _coingecko_silver_usd()
             if cg_usd:
                 ons_usd = cg_usd
                 usdtry  = _usdtry_rate()
-                if usdtry > 0:
-                    ons_tl = round(ons_usd * usdtry, 2)
-                kaynak = "CoinGecko kinesis-silver (fallback)"
+                ons_tl  = round(ons_usd * usdtry, 2) if usdtry > 0 else None
+                kaynak  = "CoinGecko kinesis-silver"
+            else:
+                hatalar.append(cg_err)
 
         if ons_usd is None or ons_usd == 0:
-            raise HTTPException(503, "Gümüş verisi alınamadı — tüm kaynaklar başarısız")
+            raise HTTPException(
+                503,
+                detail={"hata": "Gümüş verisi alınamadı — tüm kaynaklar başarısız",
+                        "detaylar": hatalar},
+            )
         if ons_tl is None or ons_tl == 0:
-            raise HTTPException(503, "USDTRY kuru alınamadı")
+            raise HTTPException(
+                503,
+                detail={"hata": "USDTRY kuru alınamadı", "detaylar": hatalar},
+            )
 
         gram_tl = round(ons_tl / 31.1035, 2)
         usdtry_hesap = round(ons_tl / ons_usd, 4) if ons_usd else 0
@@ -198,7 +215,37 @@ def gumus_tl():
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(500, detail={"error": str(e), "trace": traceback.format_exc()[-600:]})
+        raise HTTPException(500, detail={"error": str(e), "trace": traceback.format_exc()[-800:]})
+
+
+@router.get("/debug", summary="Gümüş kaynak debug bilgisi", include_in_schema=False)
+def gumus_debug():
+    """Her kaynağın durumunu gösterir — production'da kaldırın."""
+    sonuc = {}
+
+    # yfinance
+    try:
+        s = _fetch_yf("XAG=X")
+        sonuc["yfinance_xag"] = {"ok": True, "fiyat": s["fiyat"]}
+    except Exception as e:
+        sonuc["yfinance_xag"] = {"ok": False, "hata": str(e)[:200]}
+
+    # Coinbase
+    cb, cb_err = _coinbase_xag()
+    sonuc["coinbase"] = {"ok": cb is not None, "veri": cb, "hata": cb_err}
+
+    # CoinGecko
+    cg, cg_err = _coingecko_silver_usd()
+    sonuc["coingecko"] = {"ok": cg is not None, "fiyat": cg, "hata": cg_err}
+
+    # USDTRY
+    try:
+        u = _fetch_yf("USDTRY=X")
+        sonuc["usdtry"] = {"ok": True, "kur": u["fiyat"]}
+    except Exception as e:
+        sonuc["usdtry"] = {"ok": False, "hata": str(e)[:200]}
+
+    return sonuc
 
 
 @router.get("/gecmis", summary="Geçmiş gümüş fiyatları")
