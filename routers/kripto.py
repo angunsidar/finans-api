@@ -13,16 +13,31 @@ from fastapi import APIRouter, HTTPException, Query
 # Basit in-memory TTL cache: key → (timestamp, data)
 _cache: dict[str, tuple[float, object]] = {}
 
+# Stale cache: son başarılı veriyi sınırsız sakla (fallback için)
+_stale: dict[str, object] = {}
+
 def _cached(key: str, ttl: int, fetch_fn):
-    """TTL süresi geçmediyse cache'den döndür, yoksa fetch_fn çalıştır."""
+    """
+    TTL süresi geçmediyse cache'den döndür.
+    TTL dolmuşsa taze veri çek; çekemezse eski (stale) veriyi döndür.
+    Bu sayede CoinGecko rate-limit'te bile boş dönmez.
+    """
     now = time.time()
     if key in _cache:
         ts, data = _cache[key]
         if now - ts < ttl:
             return data
-    data = fetch_fn()
-    _cache[key] = (now, data)
-    return data
+    # TTL doldu — taze veri dene
+    try:
+        data = fetch_fn()
+        _cache[key] = (now, data)
+        _stale[key] = data   # başarılı veriyi stale olarak sakla
+        return data
+    except HTTPException as e:
+        # Rate limit veya geçici hata — stale veri varsa onu döndür
+        if key in _stale:
+            return _stale[key]
+        raise  # stale yoksa (ilk istek) hatayı ilet
 
 router = APIRouter(prefix="/kripto", tags=["kripto"])
 
@@ -61,7 +76,7 @@ def _resolve_id(coin: str) -> str:
     return coin.lower()
 
 
-def _get(path: str, params: dict = None, ttl: int = 60) -> dict | list:
+def _get(path: str, params: dict = None, ttl: int = 300) -> dict | list:  # default 60s → 5 dk
     """CoinGecko'ya istek at. ttl saniye boyunca cache'de tut."""
     cache_key = path + str(sorted((params or {}).items()))
 
