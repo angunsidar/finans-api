@@ -39,10 +39,16 @@ async def _warm_caches():
                     "JPYTRY=X", "AUDTRY=X", "CADTRY=X"]
     kripto_coins = kripto.WARM_COINS
 
+    # BIST ve ABD: kullanıcının portföyündeki semboller dinamik olduğundan
+    # Redis'te hangi key'lerin olduğunu önceden bilemeyiz — scan ile alıyoruz
     redis_altin  = rget_many([f"finans:altin:{k}"  for k in altin_keys])
     redis_doviz  = rget_many([f"finans:doviz:{k}"  for k in doviz_keys])
     redis_kripto = rget_many([f"finans:kripto:{c}" for c in kripto_coins])
     redis_gumus  = rget_many(["finans:gumus:tl"])
+
+    from redis_cache import rget_prefix
+    redis_bist = rget_prefix("finans:bist:")
+    redis_abd  = rget_prefix("finans:abd:")
 
     loaded = 0
     for k, rk in zip(altin_keys, [f"finans:altin:{k}" for k in altin_keys]):
@@ -60,6 +66,16 @@ async def _warm_caches():
     if redis_gumus.get("finans:gumus:tl"):
         gumus._stale["tl"] = redis_gumus["finans:gumus:tl"]
         loaded += 1
+    for rk, val in redis_bist.items():
+        if val:
+            sembol = rk.replace("finans:bist:", "")
+            bist._stale[sembol] = val
+            loaded += 1
+    for rk, val in redis_abd.items():
+        if val:
+            sembol = rk.replace("finans:abd:", "")
+            abd._stale[sembol] = val
+            loaded += 1
 
     _logger.info(f"Redis pre-load: {loaded} key yüklendi → ilk istek anında cevap verir")
 

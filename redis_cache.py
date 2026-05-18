@@ -46,6 +46,26 @@ def rget(key: str) -> dict | list | None:
     except Exception:
         return None
 
+def rget_prefix(prefix: str) -> dict[str, dict | None]:
+    """Belirli prefix'e sahip tüm key'leri tara ve değerlerini döndür."""
+    if not _ok():
+        return {}
+    try:
+        # SCAN ile key'leri bul
+        r = httpx.post(
+            _URL,
+            headers=_headers(),
+            content=json.dumps(["KEYS", f"{prefix}*"]),
+            timeout=5,
+        )
+        keys = r.json().get("result", [])
+        if not keys:
+            return {}
+        return rget_many(keys)
+    except Exception:
+        return {}
+
+
 def rget_many(keys: list[str]) -> dict[str, dict | list | None]:
     """Birden fazla key'i tek istekte çek (MGET)."""
     if not _ok() or not keys:

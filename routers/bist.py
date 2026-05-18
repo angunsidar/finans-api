@@ -58,7 +58,9 @@ def _cache_get(key: str) -> dict | None:
 
 def _cache_set(key: str, val: dict):
     _cache[key] = (time.time(), val)
-    _stale[key] = val  # her başarılı sonucu stale olarak sakla
+    _stale[key] = val
+    from redis_cache import rset
+    rset(f"finans:bist:{key}", val)
 
 
 def _ticker(sembol: str) -> str:

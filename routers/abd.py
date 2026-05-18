@@ -70,6 +70,8 @@ def _cache_get(key: str) -> dict | None:
 def _cache_set(key: str, val: dict):
     _cache[key] = (time.time(), val)
     _stale[key] = val
+    from redis_cache import rset
+    rset(f"finans:abd:{key}", val)
 
 
 def _fetch(sembol: str) -> dict:
