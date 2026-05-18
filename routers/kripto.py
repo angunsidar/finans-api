@@ -1,6 +1,12 @@
 """
 Kripto para endpoint'leri.
 CoinGecko public API üzerinden (API key gerekmez).
+
+Cache mimarisi:
+  _coin_cache / _coin_stale → coin_id bazında saklanır (örn. "bitcoin", "ethereum")
+  → Hangi kombinasyonda istenirse istensin, warm-up / keep-alive / başka kullanıcı
+    tarafından önceden çekilmiş veriler servis edilir.
+  → Flutter'ın portfolio'su değişse bile stale verisi mevcut olur.
 """
 from __future__ import annotations
 
@@ -10,62 +16,50 @@ from typing import Optional
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
-# Basit in-memory TTL cache: key → (timestamp, data)
-_cache: dict[str, tuple[float, object]] = {}
-
-# Stale cache: son başarılı veriyi sınırsız sakla (fallback için)
-_stale: dict[str, object] = {}
-
-def _cached(key: str, ttl: int, fetch_fn):
-    """
-    TTL süresi geçmediyse cache'den döndür.
-    TTL dolmuşsa taze veri çek; çekemezse eski (stale) veriyi döndür.
-    Bu sayede CoinGecko rate-limit'te bile boş dönmez.
-    """
-    now = time.time()
-    if key in _cache:
-        ts, data = _cache[key]
-        if now - ts < ttl:
-            return data
-    # TTL doldu — taze veri dene
-    try:
-        data = fetch_fn()
-        _cache[key] = (now, data)
-        _stale[key] = data   # başarılı veriyi stale olarak sakla
-        return data
-    except Exception:
-        # HTTPException (429), TimeoutException, her türlü hata — stale varsa döndür
-        if key in _stale:
-            return _stale[key]
-        raise  # stale yoksa (ilk istek) hatayı ilet
-
 router = APIRouter(prefix="/kripto", tags=["kripto"])
 
 COINGECKO_BASE = "https://api.coingecko.com/api/v3"
+_COIN_TTL = 300  # 5 dakika
+
+# Per-coin cache: coin_id → (timestamp, raw_price_dict)
+# raw_price_dict = {"try": 3000000, "usd": 90000, "try_24h_change": 1.5, ...}
+_coin_cache: dict[str, tuple[float, dict]] = {}
+_coin_stale: dict[str, dict] = {}
+
+# Diğer endpoint'ler için genel cache (piyasa listesi, trend, geçmiş)
+_gen_cache: dict[str, tuple[float, object]] = {}
+_gen_stale: dict[str, object] = {}
+
 
 # Kısa sembol → CoinGecko id eşleştirmesi
 COIN_IDS: dict[str, str] = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "BNB": "binancecoin",
-    "SOL": "solana",
-    "XRP": "ripple",
-    "ADA": "cardano",
-    "AVAX": "avalanche-2",
-    "DOT": "polkadot",
-    "LINK": "chainlink",
-    "LTC": "litecoin",
-    "DOGE": "dogecoin",
+    "BTC":   "bitcoin",
+    "ETH":   "ethereum",
+    "BNB":   "binancecoin",
+    "SOL":   "solana",
+    "XRP":   "ripple",
+    "ADA":   "cardano",
+    "AVAX":  "avalanche-2",
+    "DOT":   "polkadot",
+    "LINK":  "chainlink",
+    "LTC":   "litecoin",
+    "DOGE":  "dogecoin",
     "MATIC": "matic-network",
-    "UNI": "uniswap",
-    "ATOM": "cosmos",
-    "NEAR": "near",
-    "FTM": "fantom",
-    "TRX": "tron",
-    "SHIB": "shiba-inu",
-    "USDT": "tether",
-    "USDC": "usd-coin",
+    "UNI":   "uniswap",
+    "ATOM":  "cosmos",
+    "NEAR":  "near",
+    "FTM":   "fantom",
+    "TRX":   "tron",
+    "SHIB":  "shiba-inu",
+    "USDT":  "tether",
+    "USDC":  "usd-coin",
 }
+
+# Warm-up sırasında ısıtılacak coin listesi (en popüler 10)
+WARM_COINS = [
+    "bitcoin", "ethereum", "solana", "ripple", "tether",
+    "binancecoin", "dogecoin", "cardano", "avalanche-2", "chainlink",
+]
 
 
 def _resolve_id(coin: str) -> str:
@@ -76,8 +70,117 @@ def _resolve_id(coin: str) -> str:
     return coin.lower()
 
 
-def _get(path: str, params: dict = None, ttl: int = 300) -> dict | list:  # default 60s → 5 dk
-    """CoinGecko'ya istek at. ttl saniye boyunca cache'de tut."""
+def _fetch_coins_from_api(ids: list[str], vs: str) -> dict[str, dict]:
+    """CoinGecko'dan coin listesi çek. Sonuç: {coin_id: raw_dict}"""
+    url = f"{COINGECKO_BASE}/simple/price"
+    params = {
+        "ids": ",".join(ids),
+        "vs_currencies": vs,
+        "include_24hr_change": "true",
+        "include_24hr_vol": "true",
+        "include_market_cap": "true",
+        "include_last_updated_at": "true",
+    }
+    with httpx.Client(timeout=15) as client:
+        r = client.get(url, params=params)
+
+    if r.status_code == 429:
+        raise HTTPException(429, "CoinGecko rate limit aşıldı, lütfen bekleyiniz.")
+    if r.status_code == 404:
+        raise HTTPException(404, "Kripto para bulunamadı.")
+    r.raise_for_status()
+    return r.json()  # {coin_id: {"usd": ..., "try": ..., ...}}
+
+
+def _get_coin_price(coin_id: str, vs: str = "usd,try") -> dict:
+    """
+    Tek coin fiyatını per-coin cache üzerinden al.
+    Hata varsa stale döner; stale da yoksa hata fırlatır.
+    """
+    now = time.time()
+    if coin_id in _coin_cache:
+        ts, data = _coin_cache[coin_id]
+        if now - ts < _COIN_TTL:
+            return data
+
+    # TTL doldu veya hiç çekilmedi — taze veri dene
+    try:
+        result = _fetch_coins_from_api([coin_id], vs)
+        if coin_id in result:
+            _coin_cache[coin_id] = (now, result[coin_id])
+            _coin_stale[coin_id] = result[coin_id]
+            return result[coin_id]
+        raise HTTPException(404, f"Kripto para bulunamadı: {coin_id}")
+    except HTTPException:
+        if coin_id in _coin_stale:
+            return _coin_stale[coin_id]
+        raise
+    except Exception as e:
+        if coin_id in _coin_stale:
+            return _coin_stale[coin_id]
+        raise HTTPException(503, f"CoinGecko erişilemiyor: {e}")
+
+
+def _get_coins_bulk(coin_ids: list[str], vs: str = "usd,try") -> dict[str, dict]:
+    """
+    Çoklu coin fiyatlarını per-coin cache üzerinden al.
+    - Cache'te taze olanlar direkt döner
+    - Cache'i dolmuş veya eksik olanlar tek bir API çağrısıyla çekilir
+    - API hatası durumunda stale verisi kullanılır
+    Sonuç: {coin_id: raw_dict}  (bulunamayanlar eksik olur)
+    """
+    now = time.time()
+    result: dict[str, dict] = {}
+    to_fetch: list[str] = []
+
+    for coin_id in coin_ids:
+        if coin_id in _coin_cache:
+            ts, data = _coin_cache[coin_id]
+            if now - ts < _COIN_TTL:
+                result[coin_id] = data
+                continue
+        to_fetch.append(coin_id)
+
+    if to_fetch:
+        try:
+            fresh = _fetch_coins_from_api(to_fetch, vs)
+            for cid, data in fresh.items():
+                _coin_cache[cid] = (now, data)
+                _coin_stale[cid] = data
+                result[cid] = data
+            # API'den gelmeyen coin'ler için stale'e bak
+            for cid in to_fetch:
+                if cid not in result and cid in _coin_stale:
+                    result[cid] = _coin_stale[cid]
+        except Exception:
+            # Tüm fetch başarısız — stale'e düş
+            for cid in to_fetch:
+                if cid in _coin_stale:
+                    result[cid] = _coin_stale[cid]
+
+    return result
+
+
+def _gen_cached(key: str, ttl: int, fetch_fn):
+    """Genel amaçlı (piyasa, trend, geçmiş) TTL + stale cache."""
+    now = time.time()
+    if key in _gen_cache:
+        ts, data = _gen_cache[key]
+        if now - ts < ttl:
+            return data
+    try:
+        data = fetch_fn()
+        _gen_cache[key] = (now, data)
+        _gen_stale[key] = data
+        return data
+    except Exception:
+        if key in _gen_stale:
+            return _gen_stale[key]
+        raise
+
+
+def _gen_get(path: str, params: dict = None, ttl: int = 300) -> dict | list:
+    """Genel CoinGecko GET — piyasa listesi, trend, geçmiş için."""
     cache_key = path + str(sorted((params or {}).items()))
 
     def fetch():
@@ -85,13 +188,14 @@ def _get(path: str, params: dict = None, ttl: int = 300) -> dict | list:  # defa
         with httpx.Client(timeout=10) as client:
             r = client.get(url, params=params or {})
         if r.status_code == 429:
-            raise HTTPException(429, "CoinGecko rate limit aşıldı, lütfen bekleyiniz.")
+            raise HTTPException(429, "CoinGecko rate limit aşıldı.")
         if r.status_code == 404:
             raise HTTPException(404, "Kripto para bulunamadı.")
         r.raise_for_status()
         return r.json()
+
     try:
-        return _cached(cache_key, ttl, fetch)
+        return _gen_cached(cache_key, ttl, fetch)
     except HTTPException:
         raise
     except httpx.TimeoutException:
@@ -99,6 +203,26 @@ def _get(path: str, params: dict = None, ttl: int = 300) -> dict | list:  # defa
     except Exception as e:
         raise HTTPException(502, f"CoinGecko API hatası: {str(e)}")
 
+
+def warm_up(coins: list[str] = None):
+    """
+    Startup veya manuel çağrı için cache ısıtma.
+    coins listesi verilmezse WARM_COINS kullanılır.
+    Per-coin stale doldurulur → sonraki hatalarda fallback çalışır.
+    """
+    target = coins or WARM_COINS
+    try:
+        data = _fetch_coins_from_api(target, "usd,try")
+        now = time.time()
+        for cid, raw in data.items():
+            _coin_cache[cid] = (now, raw)
+            _coin_stale[cid] = raw
+        return True, list(data.keys())
+    except Exception as e:
+        return False, str(e)
+
+
+# ── Endpoint'ler ──────────────────────────────────────────────────────────────
 
 @router.get("/fiyat/{coin}", summary="Anlık kripto fiyatı")
 def kripto_fiyat(
@@ -108,31 +232,10 @@ def kripto_fiyat(
         description="Virgülle ayrılmış para birimleri. Örn: usd,try,eur",
     ),
 ):
-    """
-    Tek kripto para fiyatı.
-
-    - `/kripto/fiyat/BTC` → Bitcoin fiyatı
-    - `/kripto/fiyat/ETH?para_birimleri=try` → Ethereum TL fiyatı
-    - `/kripto/fiyat/bitcoin` → CoinGecko id ile de çalışır
-    """
     coin_id = _resolve_id(coin)
-    vs = para_birimleri.lower().replace(" ", "")
+    raw = _get_coin_price(coin_id, para_birimleri.lower().replace(" ", ""))
 
-    data = _get("/simple/price", {
-        "ids": coin_id,
-        "vs_currencies": vs,
-        "include_24hr_change": "true",
-        "include_24hr_vol": "true",
-        "include_market_cap": "true",
-        "include_last_updated_at": "true",
-    })
-
-    if coin_id not in data:
-        raise HTTPException(404, f"Kripto para bulunamadı: {coin}")
-
-    raw = data[coin_id]
-    birimleri = vs.split(",")
-
+    birimleri = para_birimleri.lower().replace(" ", "").split(",")
     fiyatlar = {}
     for b in birimleri:
         if b in raw:
@@ -151,6 +254,48 @@ def kripto_fiyat(
     }
 
 
+@router.get("/toplu", summary="Çoklu kripto fiyatı")
+def kripto_toplu(
+    coinler: str = Query(
+        ...,
+        description="Virgülle ayrılmış semboller veya id'ler. Örn: BTC,ETH,SOL",
+    ),
+    para_birimleri: str = Query("usd,try", description="Virgülle ayrılmış para birimleri"),
+):
+    """Birden fazla kripto parayı tek sorguda getir (per-coin cache'li)."""
+    liste = [c.strip() for c in coinler.split(",") if c.strip()]
+    if not liste:
+        raise HTTPException(400, "En az bir coin giriniz.")
+    if len(liste) > 30:
+        raise HTTPException(400, "En fazla 30 coin sorgulanabilir.")
+
+    vs = para_birimleri.lower().replace(" ", "")
+    coin_ids = [_resolve_id(c) for c in liste]
+
+    bulk = _get_coins_bulk(coin_ids, vs)
+
+    sonuclar = []
+    for coin, coin_id in zip(liste, coin_ids):
+        if coin_id in bulk:
+            raw = bulk[coin_id]
+            fiyatlar = {}
+            for b in vs.split(","):
+                if b in raw:
+                    fiyatlar[b] = {
+                        "fiyat": raw[b],
+                        "degisim_24s_yuzde": raw.get(f"{b}_24h_change"),
+                    }
+            sonuclar.append({
+                "coin": coin.upper(),
+                "coin_id": coin_id,
+                "fiyatlar": fiyatlar,
+            })
+        else:
+            sonuclar.append({"coin": coin.upper(), "hata": "bulunamadı"})
+
+    return {"sayı": len(sonuclar), "veriler": sonuclar}
+
+
 @router.get("/piyasa", summary="Kripto piyasa listesi")
 def kripto_piyasa(
     para_birimi: str = Query("try", description="Ana para birimi: try, usd, eur"),
@@ -162,13 +307,7 @@ def kripto_piyasa(
         pattern="^(market_cap_desc|market_cap_asc|volume_desc|volume_asc|id_asc|id_desc)$",
     ),
 ):
-    """
-    Piyasa değerine göre kripto para listesi.
-
-    - `para_birimi=try` → TL cinsinden fiyatlar
-    - `limit=10` → İlk 10 coin
-    """
-    data = _get("/coins/markets", {
+    data = _gen_get("/coins/markets", {
         "vs_currency": para_birimi.lower(),
         "order": siralama,
         "per_page": limit,
@@ -208,14 +347,8 @@ def kripto_gecmis(
     gun: int = Query(30, ge=1, le=365, description="Kaç günlük veri (1-365)"),
     para_birimi: str = Query("try", description="try, usd, eur"),
 ):
-    """
-    Geçmiş fiyat verisi (günlük kapanış).
-
-    - `/kripto/gecmis/BTC?gun=30` → Son 30 gün Bitcoin TL
-    - `/kripto/gecmis/ETH?gun=7&para_birimi=usd` → Son 7 gün Ethereum USD
-    """
     coin_id = _resolve_id(coin)
-    data = _get(f"/coins/{coin_id}/market_chart", {
+    data = _gen_get(f"/coins/{coin_id}/market_chart", {
         "vs_currency": para_birimi.lower(),
         "days": gun,
         "interval": "daily" if gun > 1 else "hourly",
@@ -245,8 +378,7 @@ def kripto_gecmis(
 
 @router.get("/trend", summary="Trend olan kriptolar")
 def kripto_trend():
-    """CoinGecko'nun trend listesi (son 24 saat en çok aranan 7 coin)."""
-    data = _get("/search/trending", ttl=600)
+    data = _gen_get("/search/trending", ttl=600)
     coins = data.get("coins", [])
 
     return {
@@ -262,53 +394,3 @@ def kripto_trend():
             for i, c in enumerate(coins)
         ]
     }
-
-
-@router.get("/toplu", summary="Çoklu kripto fiyatı")
-def kripto_toplu(
-    coinler: str = Query(
-        ...,
-        description="Virgülle ayrılmış semboller veya id'ler. Örn: BTC,ETH,SOL",
-    ),
-    para_birimleri: str = Query("usd,try", description="Virgülle ayrılmış para birimleri"),
-):
-    """Birden fazla kripto parayı tek sorguda getir."""
-    liste = [c.strip() for c in coinler.split(",") if c.strip()]
-    if not liste:
-        raise HTTPException(400, "En az bir coin giriniz.")
-    if len(liste) > 30:
-        raise HTTPException(400, "En fazla 30 coin sorgulanabilir.")
-
-    ids = ",".join(_resolve_id(c) for c in liste)
-    vs = para_birimleri.lower().replace(" ", "")
-
-    data = _get("/simple/price", {
-        "ids": ids,
-        "vs_currencies": vs,
-        "include_24hr_change": "true",
-        "include_24hr_vol": "true",
-        "include_market_cap": "true",
-        "include_last_updated_at": "true",
-    })
-
-    sonuclar = []
-    for coin in liste:
-        coin_id = _resolve_id(coin)
-        if coin_id in data:
-            raw = data[coin_id]
-            fiyatlar = {}
-            for b in vs.split(","):
-                if b in raw:
-                    fiyatlar[b] = {
-                        "fiyat": raw[b],
-                        "degisim_24s_yuzde": raw.get(f"{b}_24h_change"),
-                    }
-            sonuclar.append({
-                "coin": coin.upper(),
-                "coin_id": coin_id,
-                "fiyatlar": fiyatlar,
-            })
-        else:
-            sonuclar.append({"coin": coin.upper(), "hata": "bulunamadı"})
-
-    return {"sayı": len(sonuclar), "veriler": sonuclar}

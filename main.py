@@ -39,19 +39,13 @@ async def _warm_caches():
             _logger.warning(f"Warm-up ✗ altin/{sym}: {e}")
         await asyncio.sleep(1)
 
-    # Kripto (bitcoin, ethereum, solana, ripple)
-    try:
-        kripto._get("/simple/price", {
-            "ids": "bitcoin,ethereum,solana,ripple,tether",
-            "vs_currencies": "usd,try",
-            "include_24hr_change": "true",
-            "include_24hr_vol": "true",
-            "include_market_cap": "true",
-            "include_last_updated_at": "true",
-        })
-        _logger.info("Warm-up ✓ kripto")
-    except Exception as e:
-        _logger.warning(f"Warm-up ✗ kripto: {e}")
+    # Kripto — top 10 coin per-coin cache'e alınır
+    # Flutter'ın hangi coin kombinasyonunu istediğinden bağımsız çalışır
+    ok, info = kripto.warm_up()
+    if ok:
+        _logger.info(f"Warm-up ✓ kripto: {info}")
+    else:
+        _logger.warning(f"Warm-up ✗ kripto: {info}")
 
     await asyncio.sleep(1)
 
