@@ -81,6 +81,11 @@ def _fetch_info(sembol: str) -> dict:
         hist = tick.history(period="2d")
         if hist.empty:
             raise HTTPException(404, f"Hisse bulunamadı veya veri yok: {sembol.upper()}")
+        hist = hist.dropna(subset=["Close"])  # NaN fiyatları ele
+        if hist.empty:
+            if key in _stale:
+                return _stale[key]
+            raise HTTPException(503, f"Geçerli fiyat verisi yok: {sembol.upper()}")
 
         son = hist.iloc[-1]
         onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
