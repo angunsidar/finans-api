@@ -26,9 +26,44 @@ _logger = logging.getLogger("uvicorn.error")
 async def _warm_caches():
     """
     API başladığında kritik cache'leri arka planda ısıt.
-    Stale dict'ler dolunca restart sonrası ilk istek bile boş dönmez.
+    1. Önce Redis'ten oku → stale dict'leri anında doldur (milisaniye)
+    2. Sonra yfinance/CoinGecko'dan taze veri çek → stale + Redis güncelle
     """
-    await asyncio.sleep(3)  # Uvicorn tam başlasın
+    await asyncio.sleep(1)  # Uvicorn tam başlasın
+
+    # ── Adım 1: Redis'ten anında yükle ──────────────────────────────────────
+    from redis_cache import rget_many
+
+    altin_keys   = ["GC=F", "USDTRY=X", "__cb_xau__"]
+    doviz_keys   = ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "CHFTRY=X",
+                    "JPYTRY=X", "AUDTRY=X", "CADTRY=X"]
+    kripto_coins = kripto.WARM_COINS
+
+    redis_altin  = rget_many([f"finans:altin:{k}"  for k in altin_keys])
+    redis_doviz  = rget_many([f"finans:doviz:{k}"  for k in doviz_keys])
+    redis_kripto = rget_many([f"finans:kripto:{c}" for c in kripto_coins])
+    redis_gumus  = rget_many(["finans:gumus:tl"])
+
+    loaded = 0
+    for k, rk in zip(altin_keys, [f"finans:altin:{k}" for k in altin_keys]):
+        if redis_altin.get(rk):
+            altin._stale[k] = redis_altin[rk]
+            loaded += 1
+    for k, rk in zip(doviz_keys, [f"finans:doviz:{k}" for k in doviz_keys]):
+        if redis_doviz.get(rk):
+            doviz._stale[k] = redis_doviz[rk]
+            loaded += 1
+    for c, rk in zip(kripto_coins, [f"finans:kripto:{c}" for c in kripto_coins]):
+        if redis_kripto.get(rk):
+            kripto._coin_stale[c] = redis_kripto[rk]
+            loaded += 1
+    if redis_gumus.get("finans:gumus:tl"):
+        gumus._stale["tl"] = redis_gumus["finans:gumus:tl"]
+        loaded += 1
+
+    _logger.info(f"Redis pre-load: {loaded} key yüklendi → ilk istek anında cevap verir")
+
+    await asyncio.sleep(2)  # Kısa bekleme sonrası taze veri çek
 
     # Altın (GC=F futures + USD/TRY kuru)
     for sym in ["GC=F", "USDTRY=X"]:

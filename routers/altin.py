@@ -41,7 +41,9 @@ def _cache_get(key: str):
 
 def _cache_set(key: str, val: dict):
     _cache[key] = (time.time(), val)
-    _stale[key] = val  # her başarılı sonucu stale olarak sakla
+    _stale[key] = val
+    from redis_cache import rset
+    rset(f"finans:altin:{key}", val)
 
 
 # ── yfinance ─────────────────────────────────────────────────────────────────

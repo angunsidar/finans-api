@@ -23,8 +23,9 @@ _HEADERS = {
     "Accept": "application/json",
 }
 
-# ── 5 dk TTL cache ────────────────────────────────────────────────────────────
+# ── 5 dk TTL cache + stale ───────────────────────────────────────────────────
 _cache: dict[str, tuple[float, dict]] = {}
+_stale: dict[str, dict] = {}
 _CACHE_TTL = 300
 
 
@@ -188,12 +189,16 @@ def gumus_tl():
                 hatalar.append(cg_err)
 
         if ons_usd is None or ons_usd == 0:
+            if "tl" in _stale:
+                return _stale["tl"]
             raise HTTPException(
                 503,
                 detail={"hata": "Gümüş verisi alınamadı — tüm kaynaklar başarısız",
                         "detaylar": hatalar},
             )
         if ons_tl is None or ons_tl == 0:
+            if "tl" in _stale:
+                return _stale["tl"]
             raise HTTPException(
                 503,
                 detail={"hata": "USDTRY kuru alınamadı", "detaylar": hatalar},
@@ -202,7 +207,7 @@ def gumus_tl():
         gram_tl = round(ons_tl / 31.1035, 2)
         usdtry_hesap = round(ons_tl / ons_usd, 4) if ons_usd else 0
 
-        return {
+        result = {
             "gumus_usd_ons": round(ons_usd, 4),
             "usd_try": usdtry_hesap,
             "gumus_tl_ons": ons_tl,
@@ -211,10 +216,16 @@ def gumus_tl():
             "not": f"{kaynak} ile hesaplanmıştır",
             "tarih": tarih,
         }
+        _stale["tl"] = result
+        from redis_cache import rset
+        rset("finans:gumus:tl", result)
+        return result
 
     except HTTPException:
         raise
     except Exception as e:
+        if "tl" in _stale:
+            return _stale["tl"]
         raise HTTPException(500, detail={"error": str(e), "trace": traceback.format_exc()[-800:]})
 
 

@@ -144,10 +144,12 @@ def _get_coins_bulk(coin_ids: list[str], vs: str = "usd,try") -> dict[str, dict]
     if to_fetch:
         try:
             fresh = _fetch_coins_from_api(to_fetch, vs)
+            from redis_cache import rset
             for cid, data in fresh.items():
                 _coin_cache[cid] = (now, data)
                 _coin_stale[cid] = data
                 result[cid] = data
+                rset(f"finans:kripto:{cid}", data)
             # API'den gelmeyen coin'ler için stale'e bak
             for cid in to_fetch:
                 if cid not in result and cid in _coin_stale:
