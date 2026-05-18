@@ -33,8 +33,8 @@ def _cached(key: str, ttl: int, fetch_fn):
         _cache[key] = (now, data)
         _stale[key] = data   # başarılı veriyi stale olarak sakla
         return data
-    except HTTPException as e:
-        # Rate limit veya geçici hata — stale veri varsa onu döndür
+    except Exception:
+        # HTTPException (429), TimeoutException, her türlü hata — stale varsa döndür
         if key in _stale:
             return _stale[key]
         raise  # stale yoksa (ilk istek) hatayı ilet

@@ -25,8 +25,9 @@ _HEADERS = {
     "Accept": "application/json",
 }
 
-# ── TTL cache (15 dk) ─────────────────────────────────────────────────────────
+# ── TTL cache (15 dk) + stale fallback ───────────────────────────────────────
 _cache: dict[str, tuple[float, dict]] = {}
+_stale: dict[str, dict] = {}          # restart sonrası bile fallback için
 _CACHE_TTL = 900  # 15 dakika — yfinance rate-limit penceresini aşmak için
 
 
@@ -40,6 +41,7 @@ def _cache_get(key: str):
 
 def _cache_set(key: str, val: dict):
     _cache[key] = (time.time(), val)
+    _stale[key] = val  # her başarılı sonucu stale olarak sakla
 
 
 # ── yfinance ─────────────────────────────────────────────────────────────────
@@ -47,27 +49,33 @@ def _fetch(sembol: str) -> dict:
     cached = _cache_get(sembol)
     if cached:
         return cached
-    tick = yf.Ticker(sembol)
-    hist = tick.history(period="2d")
-    if hist.empty:
-        raise ValueError(f"Veri bulunamadı: {sembol}")
-    son = hist.iloc[-1]
-    onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
-    kapanis = round(float(son["Close"]), 4)
-    onceki_kapanis = float(onceki["Close"])
-    degisim = round(kapanis - onceki_kapanis, 4)
-    degisim_yuzde = round((degisim / onceki_kapanis) * 100, 2) if onceki_kapanis else 0
-    result = {
-        "fiyat": kapanis,
-        "acilis": round(float(son["Open"]), 4),
-        "yuksek": round(float(son["High"]), 4),
-        "dusuk": round(float(son["Low"]), 4),
-        "degisim": degisim,
-        "degisim_yuzde": degisim_yuzde,
-        "tarih": str(hist.index[-1].date()),
-    }
-    _cache_set(sembol, result)
-    return result
+    try:
+        tick = yf.Ticker(sembol)
+        hist = tick.history(period="2d")
+        if hist.empty:
+            raise ValueError(f"Veri bulunamadı: {sembol}")
+        son = hist.iloc[-1]
+        onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
+        kapanis = round(float(son["Close"]), 4)
+        onceki_kapanis = float(onceki["Close"])
+        degisim = round(kapanis - onceki_kapanis, 4)
+        degisim_yuzde = round((degisim / onceki_kapanis) * 100, 2) if onceki_kapanis else 0
+        result = {
+            "fiyat": kapanis,
+            "acilis": round(float(son["Open"]), 4),
+            "yuksek": round(float(son["High"]), 4),
+            "dusuk": round(float(son["Low"]), 4),
+            "degisim": degisim,
+            "degisim_yuzde": degisim_yuzde,
+            "tarih": str(hist.index[-1].date()),
+        }
+        _cache_set(sembol, result)
+        return result
+    except Exception as e:
+        # yfinance hata verdi — stale veri varsa onu döndür
+        if sembol in _stale:
+            return _stale[sembol]
+        raise  # stale da yoksa (ilk istek) hatayı ilet
 
 
 # ── Coinbase fallback (XAU-USD, XAU-TRY) ─────────────────────────────────────

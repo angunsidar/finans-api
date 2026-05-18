@@ -10,12 +10,63 @@ Ortam değişkenleri:
 from __future__ import annotations
 
 import os
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from routers import bist, kripto, altin, doviz, abd, evren, gumus
+
+_logger = logging.getLogger("uvicorn.error")
+
+
+async def _warm_caches():
+    """
+    API başladığında kritik cache'leri arka planda ısıt.
+    Stale dict'ler dolunca restart sonrası ilk istek bile boş dönmez.
+    """
+    await asyncio.sleep(3)  # Uvicorn tam başlasın
+
+    # Altın (GC=F futures + USD/TRY kuru)
+    for sym in ["GC=F", "USDTRY=X"]:
+        try:
+            altin._fetch(sym)
+            _logger.info(f"Warm-up ✓ altin/{sym}")
+        except Exception as e:
+            _logger.warning(f"Warm-up ✗ altin/{sym}: {e}")
+        await asyncio.sleep(1)
+
+    # Kripto (bitcoin, ethereum, solana, ripple)
+    try:
+        kripto._get("/simple/price", {
+            "ids": "bitcoin,ethereum,solana,ripple,tether",
+            "vs_currencies": "usd,try",
+            "include_24hr_change": "true",
+            "include_24hr_vol": "true",
+            "include_market_cap": "true",
+            "include_last_updated_at": "true",
+        })
+        _logger.info("Warm-up ✓ kripto")
+    except Exception as e:
+        _logger.warning(f"Warm-up ✗ kripto: {e}")
+
+    await asyncio.sleep(1)
+
+    # Gümüş
+    try:
+        gumus.gumus_tl()
+        _logger.info("Warm-up ✓ gumus")
+    except Exception as e:
+        _logger.warning(f"Warm-up ✗ gumus: {e}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(_warm_caches())
+    yield
 
 # ─── Ortam değişkenleri ────────────────────────────────────────────────────────
 _raw_keys = os.getenv("API_KEYS", "")
@@ -71,6 +122,7 @@ class ApiKeyMiddleware(BaseHTTPMiddleware):
 
 # ─── FastAPI App ───────────────────────────────────────────────────────────────
 app = FastAPI(
+    lifespan=lifespan,
     title="Finans API",
     description=(
         "## Türkiye & Dünya Finans Verileri\n\n"
