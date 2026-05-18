@@ -56,6 +56,16 @@ async def _warm_caches():
     except Exception as e:
         _logger.warning(f"Warm-up ✗ gumus: {e}")
 
+    await asyncio.sleep(1)
+
+    # Döviz (USD, EUR, GBP, CHF, JPY, AUD, CAD)
+    # Bu olmadan her açılışta 3-5 sn gecikme oluyordu — doviz.py artık cache'li
+    warmed = doviz.warm_up()
+    if warmed:
+        _logger.info(f"Warm-up ✓ doviz: {warmed}")
+    else:
+        _logger.warning("Warm-up ✗ doviz: hiçbiri alınamadı")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

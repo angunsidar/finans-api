@@ -1,13 +1,34 @@
 """
 Döviz kuru endpoint'leri.
 yfinance — Yahoo Finance currency pairs (=X suffix).
+5 dakika TTL cache + stale fallback (yfinance spike koruması).
 """
 from __future__ import annotations
 
+import time
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter(prefix="/doviz", tags=["döviz"])
+
+# ── TTL cache (5 dk) + stale fallback ────────────────────────────────────────
+_cache: dict[str, tuple[float, dict]] = {}
+_stale: dict[str, dict] = {}
+_TTL = 300  # 5 dakika
+
+
+def _cache_get(key: str) -> dict | None:
+    if key in _cache:
+        ts, val = _cache[key]
+        if time.time() - ts < _TTL:
+            return val
+    return None
+
+
+def _cache_set(key: str, val: dict):
+    _cache[key] = (time.time(), val)
+    _stale[key] = val
+
 
 # Desteklenen TL kurları
 TL_KURLAR: dict[str, str] = {
@@ -17,7 +38,6 @@ TL_KURLAR: dict[str, str] = {
     "CHF": "İsviçre Frangı",
     "JPY": "Japon Yeni",
     "RUB": "Rus Rublesi",
-    # "CNY": "Çin Yuanı",  # Yahoo Finance'de desteklenmiyor
     "AUD": "Avustralya Doları",
     "CAD": "Kanada Doları",
     "SEK": "İsveç Kronası",
@@ -39,27 +59,56 @@ CAPRAZ_KURLAR: dict[str, str] = {
     "XAGUSD": "Gümüş/Dolar",
 }
 
+# Startup warm-up'ta ısıtılacak dövizler
+WARM_DOVIZLER = ["USD", "EUR", "GBP", "CHF", "JPY", "AUD", "CAD"]
 
-def _fetch(sembol: str) -> dict:
-    tick = yf.Ticker(sembol)
-    hist = tick.history(period="2d")
-    if hist.empty:
-        raise HTTPException(404, f"Kur verisi bulunamadı: {sembol}")
-    son = hist.iloc[-1]
-    onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
-    kapanis = round(float(son["Close"]), 6)
-    onceki_kapanis = float(onceki["Close"])
-    degisim = round(kapanis - onceki_kapanis, 6)
-    degisim_yuzde = round((degisim / onceki_kapanis) * 100, 4) if onceki_kapanis else 0
-    return {
-        "kur": kapanis,
-        "degisim": degisim,
-        "degisim_yuzde": degisim_yuzde,
-        "acilis": round(float(son["Open"]), 6),
-        "yuksek": round(float(son["High"]), 6),
-        "dusuk": round(float(son["Low"]), 6),
-        "tarih": str(hist.index[-1].date()),
-    }
+
+def _fetch_kur(sembol: str) -> dict:
+    """Cache'li yfinance döviz çekimi. Hata varsa stale döner."""
+    cached = _cache_get(sembol)
+    if cached:
+        return cached
+
+    try:
+        tick = yf.Ticker(sembol)
+        hist = tick.history(period="2d")
+        if hist.empty:
+            raise HTTPException(404, f"Kur verisi bulunamadı: {sembol}")
+        son = hist.iloc[-1]
+        onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
+        kapanis = round(float(son["Close"]), 6)
+        onceki_kapanis = float(onceki["Close"])
+        degisim = round(kapanis - onceki_kapanis, 6)
+        degisim_yuzde = round((degisim / onceki_kapanis) * 100, 4) if onceki_kapanis else 0
+        result = {
+            "kur": kapanis,
+            "degisim": degisim,
+            "degisim_yuzde": degisim_yuzde,
+            "acilis": round(float(son["Open"]), 6),
+            "yuksek": round(float(son["High"]), 6),
+            "dusuk": round(float(son["Low"]), 6),
+            "tarih": str(hist.index[-1].date()),
+        }
+        _cache_set(sembol, result)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        if sembol in _stale:
+            return _stale[sembol]
+        raise HTTPException(503, f"Döviz verisi alınamadı: {sembol} — {e}")
+
+
+def warm_up():
+    """Startup: WARM_DOVIZLER için stale cache'i doldur."""
+    basarili = []
+    for doviz in WARM_DOVIZLER:
+        try:
+            _fetch_kur(f"{doviz}TRY=X")
+            basarili.append(doviz)
+        except Exception:
+            pass
+    return basarili
 
 
 @router.get("/liste", summary="Desteklenen para birimleri")
@@ -83,7 +132,7 @@ def doviz_tl(doviz: str):
     doviz = doviz.upper().strip()
     sembol = f"{doviz}TRY=X"
     ad = TL_KURLAR.get(doviz, f"{doviz}/TL")
-    veri = _fetch(sembol)
+    veri = _fetch_kur(sembol)
     return {
         "baz": doviz,
         "karsi": "TRY",
@@ -100,7 +149,7 @@ def doviz_tl_hepsi(
         description="Virgülle ayrılmış döviz kodları. Örn: USD,EUR,GBP",
     )
 ):
-    """Birden fazla dövizin TL kurunu tek sorguda getir."""
+    """Birden fazla dövizin TL kurunu tek sorguda getir (cache'li)."""
     liste = [k.strip().upper() for k in kodlar.split(",") if k.strip()]
     if not liste:
         raise HTTPException(400, "En az bir döviz kodu giriniz.")
@@ -111,7 +160,7 @@ def doviz_tl_hepsi(
     for doviz in liste:
         sembol = f"{doviz}TRY=X"
         try:
-            veri = _fetch(sembol)
+            veri = _fetch_kur(sembol)
             sonuclar[doviz] = {
                 "ad": TL_KURLAR.get(doviz, doviz),
                 **veri,
@@ -129,9 +178,6 @@ def doviz_capraz(cift: str):
 
     - `/doviz/capraz/EURUSD` → Euro/Dolar
     - `/doviz/capraz/USDJPY` → Dolar/Yen
-    - `/doviz/capraz/GBPUSD` → Sterlin/Dolar
-
-    Format: 6 karakter BAZKARSI (Örn: EURUSD, GBPJPY)
     """
     cift = cift.upper().strip().replace("/", "").replace("-", "")
     if len(cift) != 6:
@@ -140,7 +186,7 @@ def doviz_capraz(cift: str):
     karsi = cift[3:]
     sembol = f"{cift}=X"
     ad = CAPRAZ_KURLAR.get(cift, f"{baz}/{karsi}")
-    veri = _fetch(sembol)
+    veri = _fetch_kur(sembol)
     return {
         "baz": baz,
         "karsi": karsi,
@@ -165,7 +211,6 @@ def doviz_gecmis(
     - `/doviz/gecmis/EURUSD?period=1y&aralik=1wk` → Son 1 yıl haftalık
     """
     cift = cift.upper().strip().replace("/", "").replace("-", "")
-    # TRY çiftleri için =X ekle
     sembol = cift if cift.endswith("=X") else f"{cift}=X"
     tick = yf.Ticker(sembol)
     hist = tick.history(period=period, interval=aralik)
