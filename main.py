@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import asyncio
 import logging
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,34 +51,49 @@ async def _warm_caches():
     redis_bist = rget_prefix("finans:bist:")
     redis_abd  = rget_prefix("finans:abd:")
 
+    # _stale VE _cache ikisini birden doldur.
+    # _stale: hata durumunda fallback
+    # _cache: ilk kullanıcı isteği direkt cache'ten döner, yfinance/CoinGecko beklemez
+    now = time.time()
     loaded = 0
+
     for k, rk in zip(altin_keys, [f"finans:altin:{k}" for k in altin_keys]):
-        if redis_altin.get(rk):
-            altin._stale[k] = redis_altin[rk]
+        v = redis_altin.get(rk)
+        if v:
+            altin._stale[k] = v
+            altin._cache[k] = (now, v)
             loaded += 1
     for k, rk in zip(doviz_keys, [f"finans:doviz:{k}" for k in doviz_keys]):
-        if redis_doviz.get(rk):
-            doviz._stale[k] = redis_doviz[rk]
+        v = redis_doviz.get(rk)
+        if v:
+            doviz._stale[k] = v
+            doviz._cache[k] = (now, v)
             loaded += 1
     for c, rk in zip(kripto_coins, [f"finans:kripto:{c}" for c in kripto_coins]):
-        if redis_kripto.get(rk):
-            kripto._coin_stale[c] = redis_kripto[rk]
+        v = redis_kripto.get(rk)
+        if v:
+            kripto._coin_stale[c] = v
+            kripto._coin_cache[c] = (now, v)
             loaded += 1
-    if redis_gumus.get("finans:gumus:tl"):
-        gumus._stale["tl"] = redis_gumus["finans:gumus:tl"]
+    v = redis_gumus.get("finans:gumus:tl")
+    if v:
+        gumus._stale["tl"] = v
+        gumus._cache["tl"] = (now, v)
         loaded += 1
     for rk, val in redis_bist.items():
         if val:
             sembol = rk.replace("finans:bist:", "")
             bist._stale[sembol] = val
+            bist._cache[sembol] = (now, val)
             loaded += 1
     for rk, val in redis_abd.items():
         if val:
             sembol = rk.replace("finans:abd:", "")
             abd._stale[sembol] = val
+            abd._cache[sembol] = (now, val)
             loaded += 1
 
-    _logger.info(f"Redis pre-load: {loaded} key yüklendi → ilk istek anında cevap verir")
+    _logger.info(f"Redis pre-load: {loaded} key yüklendi → _cache + _stale dolu, ilk istek <10ms")
 
     await asyncio.sleep(2)  # Kısa bekleme sonrası taze veri çek
 
