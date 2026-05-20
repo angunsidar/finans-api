@@ -103,10 +103,10 @@ async def _warm_caches():
 
     await asyncio.sleep(2)  # Kısa bekleme sonrası taze veri çek
 
-    # Altın (GC=F futures + USD/TRY kuru)
+    # Altın (GC=F futures + USD/TRY kuru) — force=True → yfinance'e gider
     for sym in ["GC=F", "USDTRY=X"]:
         try:
-            altin._fetch(sym)
+            altin._fetch(sym, force=True)
             _logger.info(f"Warm-up ✓ altin/{sym}")
         except Exception as e:
             _logger.warning(f"Warm-up ✗ altin/{sym}: {e}")
@@ -122,9 +122,9 @@ async def _warm_caches():
 
     await asyncio.sleep(1)
 
-    # Gümüş
+    # Gümüş — force=True → yfinance'e gider
     try:
-        gumus.gumus_tl()
+        gumus.gumus_tl(force=True)
         _logger.info("Warm-up ✓ gumus")
     except Exception as e:
         _logger.warning(f"Warm-up ✗ gumus: {e}")
