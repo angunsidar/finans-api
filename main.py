@@ -134,9 +134,45 @@ async def _warm_caches():
         _logger.warning("Warm-up ✗ doviz: hiçbiri alınamadı")
 
 
+async def _fetch_all():
+    """
+    Tüm kritik veriyi paralel olarak thread pool'da çeker.
+    Event loop'u bloklamaz — yfinance/CoinGecko çağrıları ayrı thread'lerde koşar.
+    """
+    results = await asyncio.gather(
+        asyncio.to_thread(altin._fetch, "GC=F"),
+        asyncio.to_thread(altin._fetch, "USDTRY=X"),
+        asyncio.to_thread(kripto.warm_up),
+        asyncio.to_thread(doviz.warm_up),
+        asyncio.to_thread(gumus.gumus_tl),
+        return_exceptions=True,
+    )
+    for name, r in zip(["altin/GC=F", "altin/USDTRY", "kripto", "doviz", "gumus"], results):
+        if isinstance(r, Exception):
+            _logger.warning(f"BG fetch ✗ {name}: {r}")
+        else:
+            _logger.debug(f"BG fetch ✓ {name}")
+
+
+async def _background_worker():
+    """
+    Arka plan döngüsü — her 5 dakikada bir _fetch_all() çağırır.
+    Kullanıcı isteği beklemeden cache her zaman sıcak kalır.
+    """
+    await asyncio.sleep(35)  # İlk warm-up bitsin, sonra döngüye gir
+    while True:
+        try:
+            await _fetch_all()
+            _logger.info("BG worker: tüm veri güncellendi")
+        except Exception as e:
+            _logger.warning(f"BG worker genel hata: {e}")
+        await asyncio.sleep(300)  # 5 dakika bekle, tekrar çek
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(_warm_caches())
+    asyncio.create_task(_background_worker())
     yield
 
 # ─── Ortam değişkenleri ────────────────────────────────────────────────────────
