@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import asyncio
+import concurrent.futures
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -22,6 +23,11 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from routers import bist, kripto, altin, doviz, abd, evren, gumus
 
 _logger = logging.getLogger("uvicorn.error")
+
+# Background worker için ayrı thread pool — FastAPI'nin pool'unu işgal etmez
+_bg_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=3, thread_name_prefix="bg_worker"
+)
 
 
 async def _warm_caches():
@@ -136,18 +142,24 @@ async def _warm_caches():
 
 async def _fetch_all():
     """
-    Tüm kritik veriyi paralel olarak thread pool'da çeker.
-    Event loop'u bloklamaz — yfinance/CoinGecko çağrıları ayrı thread'lerde koşar.
+    Tüm kritik veriyi paralel olarak dedicated thread pool'da çeker.
+    FastAPI'nin thread pool'unu işgal etmez — kullanıcı istekleri etkilenmez.
+    force=True → yfinance/CoinGecko'ya gider (Redis fallback'i atlar).
     """
+    loop = asyncio.get_event_loop()
     results = await asyncio.gather(
-        asyncio.to_thread(altin._fetch, "GC=F"),
-        asyncio.to_thread(altin._fetch, "USDTRY=X"),
-        asyncio.to_thread(kripto.warm_up),
-        asyncio.to_thread(doviz.warm_up),
-        asyncio.to_thread(gumus.gumus_tl),
+        loop.run_in_executor(_bg_executor, lambda: altin._fetch("GC=F", force=True)),
+        loop.run_in_executor(_bg_executor, lambda: altin._fetch("USDTRY=X", force=True)),
+        loop.run_in_executor(_bg_executor, kripto.warm_up),
+        loop.run_in_executor(_bg_executor, doviz.warm_up),
+        loop.run_in_executor(_bg_executor, lambda: gumus.gumus_tl(force=True)),
+        loop.run_in_executor(_bg_executor, bist.warm_up),
+        loop.run_in_executor(_bg_executor, abd.warm_up),
         return_exceptions=True,
     )
-    for name, r in zip(["altin/GC=F", "altin/USDTRY", "kripto", "doviz", "gumus"], results):
+    for name, r in zip(
+        ["altin/GC=F", "altin/USDTRY", "kripto", "doviz", "gumus", "bist", "abd"], results
+    ):
         if isinstance(r, Exception):
             _logger.warning(f"BG fetch ✗ {name}: {r}")
         else:

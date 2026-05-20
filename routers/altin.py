@@ -47,10 +47,21 @@ def _cache_set(key: str, val: dict):
 
 
 # ── yfinance ─────────────────────────────────────────────────────────────────
-def _fetch(sembol: str) -> dict:
-    cached = _cache_get(sembol)
-    if cached:
-        return cached
+def _fetch(sembol: str, force: bool = False) -> dict:
+    if not force:
+        # 1. Memory cache
+        cached = _cache_get(sembol)
+        if cached:
+            return cached
+        # 2. Redis fallback
+        from redis_cache import rget
+        redis_val = rget(f"finans:altin:{sembol}")
+        if redis_val:
+            _cache[sembol] = (time.time(), redis_val)
+            _stale[sembol] = redis_val
+            return redis_val
+
+    # 3. yfinance
     try:
         tick = yf.Ticker(sembol)
         hist = tick.history(period="2d")

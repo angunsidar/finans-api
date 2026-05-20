@@ -70,12 +70,23 @@ def _ticker(sembol: str) -> str:
     return sembol
 
 
-def _fetch_info(sembol: str) -> dict:
+def _fetch_info(sembol: str, force: bool = False) -> dict:
     key = sembol.upper()
-    cached = _cache_get(key)
-    if cached:
-        return cached
 
+    if not force:
+        # 1. Memory cache
+        cached = _cache_get(key)
+        if cached:
+            return cached
+        # 2. Redis fallback — yfinance'e gitmeden önce
+        from redis_cache import rget
+        redis_val = rget(f"finans:bist:{key}")
+        if redis_val:
+            _cache[key] = (time.time(), redis_val)
+            _stale[key] = redis_val
+            return redis_val
+
+    # 3. yfinance (force=True veya Redis de boşsa)
     try:
         tick = yf.Ticker(_ticker(sembol))
 
@@ -120,6 +131,22 @@ def _fetch_info(sembol: str) -> dict:
         if key in _stale:
             return _stale[key]
         raise HTTPException(503, f"Veri alınamadı: {sembol.upper()} — {e}")
+
+
+# İlk 10 popüler hisse — background worker ısıtır
+WARM_HISSELER = list(POPULER_HISSELER.keys())[:10]
+
+
+def warm_up() -> list[str]:
+    """Background worker: popüler BIST hisseleri için yfinance'den taze veri çek."""
+    basarili = []
+    for sembol in WARM_HISSELER:
+        try:
+            _fetch_info(sembol, force=True)
+            basarili.append(sembol)
+        except Exception:
+            pass
+    return basarili
 
 
 # ── Endpoint'ler ──────────────────────────────────────────────────────────────
@@ -178,6 +205,14 @@ def endeks_fiyat(sembol: str):
     cached = _cache_get(key)
     if cached:
         return cached
+
+    # Redis fallback
+    from redis_cache import rget
+    redis_val = rget(f"finans:bist:{key}")
+    if redis_val:
+        _cache[key] = (time.time(), redis_val)
+        _stale[key] = redis_val
+        return redis_val
 
     try:
         tick = yf.Ticker(yahoo_sembol)

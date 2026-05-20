@@ -39,6 +39,9 @@ def _cache_get(key: str):
 
 def _cache_set(key: str, val: dict):
     _cache[key] = (time.time(), val)
+    _stale[key] = val
+    from redis_cache import rset
+    rset(f"finans:gumus:{key}", val)
 
 
 # ── yfinance ─────────────────────────────────────────────────────────────────
@@ -143,10 +146,18 @@ def gumus_ozet():
 
 
 @router.get("/tl", summary="Gümüş TL karşılığı (hesaplanmış)")
-def gumus_tl():
+def gumus_tl(force: bool = False):
     """
     Kaynak zinciri: yfinance XAG=X → Coinbase XAG-USD/TRY → CoinGecko kinesis-silver
     """
+    # Redis'te önceden hesaplanmış sonuç varsa direkt dön (background worker force=True ile yeniler)
+    if not force:
+        from redis_cache import rget
+        cached = rget("finans:gumus:tl")
+        if cached:
+            _stale["tl"] = cached
+            return cached
+
     try:
         ons_usd: float | None = None
         ons_tl: float | None = None

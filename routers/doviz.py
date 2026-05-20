@@ -65,12 +65,22 @@ CAPRAZ_KURLAR: dict[str, str] = {
 WARM_DOVIZLER = ["USD", "EUR", "GBP", "CHF", "JPY", "AUD", "CAD"]
 
 
-def _fetch_kur(sembol: str) -> dict:
+def _fetch_kur(sembol: str, force: bool = False) -> dict:
     """Cache'li yfinance döviz çekimi. Hata varsa stale döner."""
-    cached = _cache_get(sembol)
-    if cached:
-        return cached
+    if not force:
+        # 1. Memory cache
+        cached = _cache_get(sembol)
+        if cached:
+            return cached
+        # 2. Redis fallback
+        from redis_cache import rget
+        redis_val = rget(f"finans:doviz:{sembol}")
+        if redis_val:
+            _cache[sembol] = (time.time(), redis_val)
+            _stale[sembol] = redis_val
+            return redis_val
 
+    # 3. yfinance
     try:
         tick = yf.Ticker(sembol)
         hist = tick.history(period="2d")
@@ -102,11 +112,11 @@ def _fetch_kur(sembol: str) -> dict:
 
 
 def warm_up():
-    """Startup: WARM_DOVIZLER için stale cache'i doldur."""
+    """Background worker: WARM_DOVIZLER için yfinance'den taze veri çek."""
     basarili = []
     for doviz in WARM_DOVIZLER:
         try:
-            _fetch_kur(f"{doviz}TRY=X")
+            _fetch_kur(f"{doviz}TRY=X", force=True)
             basarili.append(doviz)
         except Exception:
             pass
