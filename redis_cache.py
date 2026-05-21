@@ -1,86 +1,101 @@
 """
-Upstash Redis REST API — kalıcı stale cache.
+Redis Cloud TCP bağlantısı — kalıcı stale cache.
 Render restart/deploy sonrası bile son bilinen fiyatlar anında hazır olur.
+
+Ortam değişkenleri:
+  REDIS_HOST  → Redis Cloud public endpoint host
+  REDIS_PORT  → Redis Cloud public endpoint port
+  REDIS_PASSWORD → Redis Cloud default user password
 """
 from __future__ import annotations
-import os, json
-import httpx
+import os
+import json
+import logging
 
-_URL   = os.getenv("UPSTASH_REDIS_REST_URL", "").rstrip("/")
-_TOKEN = os.getenv("UPSTASH_REDIS_REST_TOKEN", "")
-_TTL   = 86400  # 24 saat
+_logger = logging.getLogger("uvicorn.error")
 
-def _ok() -> bool:
-    return bool(_URL and _TOKEN)
+_HOST     = os.getenv("REDIS_HOST", "")
+_PORT     = int(os.getenv("REDIS_PORT", "6379"))
+_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+_TTL      = 86400  # 24 saat
 
-def _headers() -> dict:
-    return {"Authorization": f"Bearer {_TOKEN}", "Content-Type": "application/json"}
+_client = None
+
+
+def _get_client():
+    global _client
+    if _client is not None:
+        return _client
+    if not _HOST:
+        return None
+    try:
+        import redis
+        _client = redis.Redis(
+            host=_HOST,
+            port=_PORT,
+            password=_PASSWORD,
+            ssl=True,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            retry_on_timeout=True,
+        )
+        _client.ping()
+        _logger.info(f"Redis Cloud bağlandı: {_HOST}:{_PORT}")
+        return _client
+    except Exception as e:
+        _logger.warning(f"Redis Cloud bağlantı hatası: {e}")
+        _client = None
+        return None
+
 
 def rset(key: str, value: dict | list):
     """Redis'e yaz (TTL 24 saat). Hata olursa sessizce geç."""
-    if not _ok():
+    r = _get_client()
+    if not r:
         return
     try:
-        httpx.post(
-            _URL,
-            headers=_headers(),
-            content=json.dumps(["SET", key, json.dumps(value, ensure_ascii=False), "EX", str(_TTL)]),
-            timeout=3,
-        )
+        r.set(key, json.dumps(value, ensure_ascii=False), ex=_TTL)
     except Exception:
         pass
 
+
 def rget(key: str) -> dict | list | None:
     """Redis'ten oku. Yoksa veya hata varsa None döner."""
-    if not _ok():
+    r = _get_client()
+    if not r:
         return None
     try:
-        r = httpx.post(
-            _URL,
-            headers=_headers(),
-            content=json.dumps(["GET", key]),
-            timeout=3,
-        )
-        val = r.json().get("result")
+        val = r.get(key)
         return json.loads(val) if val else None
     except Exception:
         return None
 
-def rget_prefix(prefix: str) -> dict[str, dict | None]:
-    """Belirli prefix'e sahip tüm key'leri tara ve değerlerini döndür."""
-    if not _ok():
-        return {}
-    try:
-        # SCAN ile key'leri bul
-        r = httpx.post(
-            _URL,
-            headers=_headers(),
-            content=json.dumps(["KEYS", f"{prefix}*"]),
-            timeout=5,
-        )
-        keys = r.json().get("result", [])
-        if not keys:
-            return {}
-        return rget_many(keys)
-    except Exception:
-        return {}
-
 
 def rget_many(keys: list[str]) -> dict[str, dict | list | None]:
     """Birden fazla key'i tek istekte çek (MGET)."""
-    if not _ok() or not keys:
+    r = _get_client()
+    if not r or not keys:
         return {}
     try:
-        r = httpx.post(
-            _URL,
-            headers=_headers(),
-            content=json.dumps(["MGET", *keys]),
-            timeout=5,
-        )
-        results = r.json().get("result", [])
+        results = r.mget(keys)
         return {
             k: (json.loads(v) if v else None)
             for k, v in zip(keys, results)
         }
+    except Exception:
+        return {}
+
+
+def rget_prefix(prefix: str) -> dict[str, dict | None]:
+    """Belirli prefix'e sahip tüm key'leri tara ve değerlerini döndür."""
+    r = _get_client()
+    if not r:
+        return {}
+    try:
+        keys = list(r.scan_iter(f"{prefix}*", count=500))
+        if not keys:
+            return {}
+        return rget_many(keys)
     except Exception:
         return {}
