@@ -39,6 +39,7 @@ def _get_client():
             socket_connect_timeout=3,
             socket_timeout=3,
             retry_on_timeout=True,
+            health_check_interval=30,   # 30sn'de bir bağlantıyı kontrol et
         )
         _client.ping()
         _logger.info(f"Redis Cloud bağlandı: {_HOST}:{_PORT}")
@@ -49,6 +50,12 @@ def _get_client():
         return None
 
 
+def _reset_client():
+    """Bağlantı hatası sonrası client'ı sıfırla → bir sonraki çağrıda yeniden bağlanır."""
+    global _client
+    _client = None
+
+
 def rset(key: str, value: dict | list):
     """Redis'e yaz (TTL 24 saat). Hata olursa sessizce geç."""
     r = _get_client()
@@ -56,8 +63,9 @@ def rset(key: str, value: dict | list):
         return
     try:
         r.set(key, json.dumps(value, ensure_ascii=False), ex=_TTL)
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.debug(f"Redis rset hata ({key}): {e}")
+        _reset_client()
 
 
 def rget(key: str) -> dict | list | None:
@@ -68,7 +76,9 @@ def rget(key: str) -> dict | list | None:
     try:
         val = r.get(key)
         return json.loads(val) if val else None
-    except Exception:
+    except Exception as e:
+        _logger.debug(f"Redis rget hata ({key}): {e}")
+        _reset_client()
         return None
 
 
@@ -83,7 +93,9 @@ def rget_many(keys: list[str]) -> dict[str, dict | list | None]:
             k: (json.loads(v) if v else None)
             for k, v in zip(keys, results)
         }
-    except Exception:
+    except Exception as e:
+        _logger.debug(f"Redis rget_many hata: {e}")
+        _reset_client()
         return {}
 
 
@@ -98,8 +110,9 @@ def rset_many(data: dict, ttl: int | None = None) -> None:
         for key, value in data.items():
             pipe.set(key, json.dumps(value, ensure_ascii=False), ex=t)
         pipe.execute()
-    except Exception:
-        pass
+    except Exception as e:
+        _logger.debug(f"Redis rset_many hata: {e}")
+        _reset_client()
 
 
 def rget_prefix(prefix: str) -> dict[str, dict | None]:
@@ -112,5 +125,7 @@ def rget_prefix(prefix: str) -> dict[str, dict | None]:
         if not keys:
             return {}
         return rget_many(keys)
-    except Exception:
+    except Exception as e:
+        _logger.debug(f"Redis rget_prefix hata ({prefix}): {e}")
+        _reset_client()
         return {}
