@@ -41,14 +41,16 @@ async def _warm_caches():
     # ── Adım 1: Redis'ten anında yükle ──────────────────────────────────────
     from redis_cache import rget_many
 
-    altin_keys   = ["GC=F", "__cb_xau__"]
+    altin_raw_keys = ["GC=F", "__cb_xau__"]
     doviz_keys   = ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "CHFTRY=X",
                     "JPYTRY=X", "AUDTRY=X", "CADTRY=X"]
     kripto_coins = kripto.WARM_COINS
 
     # BIST ve ABD: kullanıcının portföyündeki semboller dinamik olduğundan
     # Redis'te hangi key'lerin olduğunu önceden bilemeyiz — scan ile alıyoruz
-    redis_altin  = rget_many([f"finans:altin:{k}"  for k in altin_keys])
+    redis_altin  = rget_many(
+        [f"finans:altin:{k}" for k in altin_raw_keys] + ["finans:altin:tl"]
+    )
     redis_doviz  = rget_many([f"finans:doviz:{k}"  for k in doviz_keys])
     redis_kripto = rget_many([f"finans:kripto:{c}" for c in kripto_coins])
     redis_gumus  = rget_many(["finans:gumus:tl"])
@@ -63,12 +65,17 @@ async def _warm_caches():
     now = time.time()
     loaded = 0
 
-    for k, rk in zip(altin_keys, [f"finans:altin:{k}" for k in altin_keys]):
-        v = redis_altin.get(rk)
+    for k in altin_raw_keys:
+        v = redis_altin.get(f"finans:altin:{k}")
         if v:
             altin._stale[k] = v
             altin._cache[k] = (now, v)
             loaded += 1
+    # Önceden hesaplanmış TL sonucu (finans:altin:tl → _stale["__tl__"])
+    v_tl = redis_altin.get("finans:altin:tl")
+    if v_tl:
+        altin._stale["__tl__"] = v_tl
+        loaded += 1
     for k, rk in zip(doviz_keys, [f"finans:doviz:{k}" for k in doviz_keys]):
         v = redis_doviz.get(rk)
         if v:
@@ -112,12 +119,17 @@ async def _warm_caches():
 
     await asyncio.sleep(1)
 
-    # Altın futures (GC=F) — USDTRY artık doviz cache'inden okunur
+    # Altın futures (GC=F) + TL hesabı — USDTRY artık doviz cache'inden okunur
     try:
         altin._fetch("GC=F", force=True)
         _logger.info("Warm-up ✓ altin/GC=F")
     except Exception as e:
         _logger.warning(f"Warm-up ✗ altin/GC=F: {e}")
+    try:
+        altin.warm_up_tl(force=True)  # GC=F × USDTRY → finans:altin:tl Redis'e
+        _logger.info("Warm-up ✓ altin/tl")
+    except Exception as e:
+        _logger.warning(f"Warm-up ✗ altin/tl: {e}")
 
     await asyncio.sleep(1)
 
@@ -151,6 +163,7 @@ async def _fetch_all():
     loop = asyncio.get_event_loop()
     results = await asyncio.gather(
         loop.run_in_executor(_bg_executor, lambda: altin._fetch("GC=F", force=True)),
+        loop.run_in_executor(_bg_executor, lambda: altin.warm_up_tl(force=True)),  # TL ön-hesap → Redis
         loop.run_in_executor(_bg_executor, kripto.warm_up),
         loop.run_in_executor(_bg_executor, doviz.warm_up),       # USDTRY dahil
         loop.run_in_executor(_bg_executor, lambda: gumus.gumus_tl(force=True)),
@@ -159,7 +172,7 @@ async def _fetch_all():
         return_exceptions=True,
     )
     for name, r in zip(
-        ["altin/GC=F", "kripto", "doviz", "gumus", "bist", "abd"], results
+        ["altin/GC=F", "altin/tl", "kripto", "doviz", "gumus", "bist", "abd"], results
     ):
         if isinstance(r, Exception):
             _logger.warning(f"BG fetch ✗ {name}: {r}")

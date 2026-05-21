@@ -183,68 +183,107 @@ def altin_bist():
             "borsa": "BIST", **veri}
 
 
+def altin_tl_hesapla(force: bool = False) -> dict:
+    """
+    Altın TL hesabını yap ve Redis'e kaydet.
+    force=False → Redis'te hazır sonuç varsa direkt döner (kullanıcı isteği için)
+    force=True  → yeniden hesapla ve Redis'i güncelle (background worker için)
+    """
+    # Redis'te hazır sonuç var mı? → direkt dön (gumus_tl mantığının aynısı)
+    if not force:
+        from redis_cache import rget
+        cached = rget("finans:altin:tl")
+        if cached:
+            _stale["__tl__"] = cached
+            return cached
+        # Stale fallback
+        if "__tl__" in _stale:
+            return _stale["__tl__"]
+
+    ons_usd: float | None = None
+    ons_tl: float | None = None
+    degisim_yuzde: float = 0.0
+    tarih: str = ""
+    kaynak: str = ""
+    hatalar: list[str] = []
+
+    # 1. yfinance GC=F × USDTRY=X
+    try:
+        gold    = _fetch("GC=F")
+        usdtry  = _get_usdtry()
+        ons_usd = gold["fiyat"]
+        ons_tl  = round(ons_usd * usdtry, 2)
+        degisim_yuzde = gold["degisim_yuzde"]
+        tarih   = gold["tarih"]
+        kaynak  = "yfinance GC=F × USDTRY=X"
+    except Exception as e:
+        hatalar.append(f"yfinance: {e}")
+
+    # 2. Coinbase fallback
+    if ons_usd is None:
+        cb, cb_err = _coinbase_xau()
+        if cb:
+            ons_usd = cb["usd_ons"]
+            ons_tl  = round(cb["try_ons"], 2)
+            kaynak  = "Coinbase XAU-USD/TRY"
+        else:
+            hatalar.append(cb_err)
+
+    if ons_usd is None or ons_usd == 0:
+        if "__tl__" in _stale:
+            return _stale["__tl__"]
+        raise HTTPException(
+            503,
+            detail={"hata": "Altın verisi alınamadı", "detaylar": hatalar},
+        )
+    if ons_tl is None or ons_tl == 0:
+        if "__tl__" in _stale:
+            return _stale["__tl__"]
+        raise HTTPException(503, detail={"hata": "USDTRY kuru alınamadı"})
+
+    gram_tl      = round(ons_tl / 31.1035, 2)
+    usdtry_hesap = round(ons_tl / ons_usd, 4) if ons_usd else 0
+
+    result = {
+        "altin_usd_ons": round(ons_usd, 4),
+        "usd_try": usdtry_hesap,
+        "altin_tl_ons": ons_tl,
+        "altin_tl_gram": gram_tl,
+        "altin_22ayar_gram": round(gram_tl * 0.916, 2),
+        "not": f"{kaynak} ile hesaplanmıştır",
+        "tarih": tarih,
+    }
+    # Hesaplanan sonucu Redis'e yaz (background worker günceller)
+    _stale["__tl__"] = result
+    from redis_cache import rset
+    rset("finans:altin:tl", result)
+    return result
+
+
 @router.get("/tl", summary="Altın TL karşılığı (hesaplanmış)")
 def altin_tl():
     """
     Kaynak zinciri: yfinance GC=F × USDTRY=X → Coinbase XAU-USD/TRY
-    15 dakika TTL cache.
+    Redis'te hazır sonuç varsa direkt döner (<5ms).
     """
     try:
-        ons_usd: float | None = None
-        ons_tl: float | None = None
-        degisim_yuzde: float = 0.0
-        tarih: str = ""
-        kaynak: str = ""
-        hatalar: list[str] = []
-
-        # 1. yfinance GC=F × USDTRY=X (USDTRY doviz modülünden paylaşılır)
-        try:
-            gold    = _fetch("GC=F")
-            usdtry  = _get_usdtry()
-            ons_usd = gold["fiyat"]
-            ons_tl  = round(ons_usd * usdtry, 2)
-            degisim_yuzde = gold["degisim_yuzde"]
-            tarih   = gold["tarih"]
-            kaynak  = "yfinance GC=F × USDTRY=X"
-        except Exception as e:
-            hatalar.append(f"yfinance: {e}")
-
-        # 2. Coinbase XAU-USD + XAU-TRY
-        if ons_usd is None:
-            cb, cb_err = _coinbase_xau()
-            if cb:
-                ons_usd = cb["usd_ons"]
-                ons_tl  = round(cb["try_ons"], 2)
-                kaynak  = "Coinbase XAU-USD/TRY"
-            else:
-                hatalar.append(cb_err)
-
-        if ons_usd is None or ons_usd == 0:
-            raise HTTPException(
-                503,
-                detail={"hata": "Altın verisi alınamadı — tüm kaynaklar başarısız",
-                        "detaylar": hatalar},
-            )
-        if ons_tl is None or ons_tl == 0:
-            raise HTTPException(503, detail={"hata": "USDTRY kuru alınamadı"})
-
-        gram_tl      = round(ons_tl / 31.1035, 2)
-        usdtry_hesap = round(ons_tl / ons_usd, 4) if ons_usd else 0
-
-        return {
-            "altin_usd_ons": round(ons_usd, 4),
-            "usd_try": usdtry_hesap,
-            "altin_tl_ons": ons_tl,
-            "altin_tl_gram": gram_tl,
-            "altin_22ayar_gram": round(gram_tl * 0.916, 2),
-            "not": f"{kaynak} ile hesaplanmıştır",
-            "tarih": tarih,
-        }
-
+        return altin_tl_hesapla(force=False)
     except HTTPException:
         raise
     except Exception as e:
+        if "__tl__" in _stale:
+            return _stale["__tl__"]
         raise HTTPException(500, detail={"error": str(e), "trace": traceback.format_exc()[-500:]})
+
+
+# Internal helper — background worker çağırır
+def warm_up_tl(force: bool = True) -> dict:
+    """Background worker: altın TL sonucunu hesapla ve Redis'e yaz."""
+    try:
+        return altin_tl_hesapla(force=force)
+    except Exception:
+        return {}
+
 
 
 @router.get("/gecmis", summary="Geçmiş altın fiyatları")
