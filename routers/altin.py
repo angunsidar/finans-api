@@ -91,6 +91,43 @@ def _fetch(sembol: str, force: bool = False) -> dict:
         raise  # stale da yoksa (ilk istek) hatayı ilet
 
 
+# ── USDTRY paylaşımlı çekim — doviz modülünden okur ─────────────────────────
+def _get_usdtry() -> float:
+    """
+    USD/TRY kurunu doviz modülünün cache'inden oku.
+    doviz.warm_up() zaten bu veriyi çekiyorsa yfinance'e tekrar gitme.
+    Fallback sırası: doviz._cache → Redis → doviz._fetch_kur → yfinance
+    """
+    # 1. doviz memory cache
+    try:
+        from routers import doviz as _doviz
+        cached = _doviz._cache_get("USDTRY=X")
+        if cached:
+            return cached["kur"]
+    except Exception:
+        pass
+
+    # 2. Redis
+    try:
+        from redis_cache import rget
+        rv = rget("finans:doviz:USDTRY=X")
+        if rv:
+            return rv["kur"]
+    except Exception:
+        pass
+
+    # 3. doviz._fetch_kur (yfinance + doviz cache'e yazar)
+    try:
+        from routers import doviz as _doviz
+        rv = _doviz._fetch_kur("USDTRY=X")
+        return rv["kur"]
+    except Exception:
+        pass
+
+    # 4. Kendi _fetch (altin cache olarak kaydeder — son çare)
+    return _fetch("USDTRY=X")["fiyat"]
+
+
 # ── Coinbase fallback (XAU-USD, XAU-TRY) ─────────────────────────────────────
 def _coinbase_xau() -> tuple[dict | None, str]:
     cached = _cache_get("__cb_xau__")
@@ -160,12 +197,12 @@ def altin_tl():
         kaynak: str = ""
         hatalar: list[str] = []
 
-        # 1. yfinance GC=F × USDTRY=X
+        # 1. yfinance GC=F × USDTRY=X (USDTRY doviz modülünden paylaşılır)
         try:
-            gold = _fetch("GC=F")
-            usd  = _fetch("USDTRY=X")
+            gold    = _fetch("GC=F")
+            usdtry  = _get_usdtry()
             ons_usd = gold["fiyat"]
-            ons_tl  = round(ons_usd * usd["fiyat"], 2)
+            ons_tl  = round(ons_usd * usdtry, 2)
             degisim_yuzde = gold["degisim_yuzde"]
             tarih   = gold["tarih"]
             kaynak  = "yfinance GC=F × USDTRY=X"
@@ -191,7 +228,7 @@ def altin_tl():
         if ons_tl is None or ons_tl == 0:
             raise HTTPException(503, detail={"hata": "USDTRY kuru alınamadı"})
 
-        gram_tl = round(ons_tl / 31.1035, 2)
+        gram_tl      = round(ons_tl / 31.1035, 2)
         usdtry_hesap = round(ons_tl / ons_usd, 4) if ons_usd else 0
 
         return {

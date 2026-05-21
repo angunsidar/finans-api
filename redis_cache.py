@@ -87,6 +87,21 @@ def rget_many(keys: list[str]) -> dict[str, dict | list | None]:
         return {}
 
 
+def rset_many(data: dict, ttl: int | None = None) -> None:
+    """Birden fazla key'i tek pipeline ile yaz — Bigpara/toplu cache için."""
+    r = _get_client()
+    if not r or not data:
+        return
+    try:
+        t = ttl or _TTL
+        pipe = r.pipeline()
+        for key, value in data.items():
+            pipe.set(key, json.dumps(value, ensure_ascii=False), ex=t)
+        pipe.execute()
+    except Exception:
+        pass
+
+
 def rget_prefix(prefix: str) -> dict[str, dict | None]:
     """Belirli prefix'e sahip tüm key'leri tara ve değerlerini döndür."""
     r = _get_client()

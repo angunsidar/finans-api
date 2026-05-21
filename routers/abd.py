@@ -134,8 +134,8 @@ def _fetch(sembol: str, force: bool = False) -> dict:
         raise HTTPException(503, f"Veri alınamadı: {sembol.upper()} — {e}")
 
 
-# İlk 10 popüler ABD hissesi — background worker ısıtır
-WARM_HISSELER = list(POPULER_HISSELER.keys())[:10]
+# Top 6 popüler ABD hissesi — background worker ısıtır (AAPL, MSFT, NVDA, GOOGL, AMZN, META)
+WARM_HISSELER = list(POPULER_HISSELER.keys())[:6]
 
 
 def warm_up() -> list[str]:

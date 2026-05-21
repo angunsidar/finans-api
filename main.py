@@ -41,7 +41,7 @@ async def _warm_caches():
     # ── Adım 1: Redis'ten anında yükle ──────────────────────────────────────
     from redis_cache import rget_many
 
-    altin_keys   = ["GC=F", "USDTRY=X", "__cb_xau__"]
+    altin_keys   = ["GC=F", "__cb_xau__"]
     doviz_keys   = ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "CHFTRY=X",
                     "JPYTRY=X", "AUDTRY=X", "CADTRY=X"]
     kripto_coins = kripto.WARM_COINS
@@ -103,17 +103,25 @@ async def _warm_caches():
 
     await asyncio.sleep(2)  # Kısa bekleme sonrası taze veri çek
 
-    # Altın (GC=F futures + USD/TRY kuru) — force=True → yfinance'e gider
-    for sym in ["GC=F", "USDTRY=X"]:
-        try:
-            altin._fetch(sym, force=True)
-            _logger.info(f"Warm-up ✓ altin/{sym}")
-        except Exception as e:
-            _logger.warning(f"Warm-up ✗ altin/{sym}: {e}")
-        await asyncio.sleep(1)
+    # ── Önce döviz — USDTRY dahil; altin + gumus bunu okur ───────────────────
+    warmed = doviz.warm_up()
+    if warmed:
+        _logger.info(f"Warm-up ✓ doviz: {warmed}")
+    else:
+        _logger.warning("Warm-up ✗ doviz: hiçbiri alınamadı")
+
+    await asyncio.sleep(1)
+
+    # Altın futures (GC=F) — USDTRY artık doviz cache'inden okunur
+    try:
+        altin._fetch("GC=F", force=True)
+        _logger.info("Warm-up ✓ altin/GC=F")
+    except Exception as e:
+        _logger.warning(f"Warm-up ✗ altin/GC=F: {e}")
+
+    await asyncio.sleep(1)
 
     # Kripto — top 10 coin per-coin cache'e alınır
-    # Flutter'ın hangi coin kombinasyonunu istediğinden bağımsız çalışır
     ok, info = kripto.warm_up()
     if ok:
         _logger.info(f"Warm-up ✓ kripto: {info}")
@@ -122,43 +130,36 @@ async def _warm_caches():
 
     await asyncio.sleep(1)
 
-    # Gümüş — force=True → yfinance'e gider
+    # Gümüş — USDTRY artık doviz cache'inden okunur
     try:
         gumus.gumus_tl(force=True)
         _logger.info("Warm-up ✓ gumus")
     except Exception as e:
         _logger.warning(f"Warm-up ✗ gumus: {e}")
 
-    await asyncio.sleep(1)
-
-    # Döviz (USD, EUR, GBP, CHF, JPY, AUD, CAD)
-    # Bu olmadan her açılışta 3-5 sn gecikme oluyordu — doviz.py artık cache'li
-    warmed = doviz.warm_up()
-    if warmed:
-        _logger.info(f"Warm-up ✓ doviz: {warmed}")
-    else:
-        _logger.warning("Warm-up ✗ doviz: hiçbiri alınamadı")
-
 
 async def _fetch_all():
     """
     Tüm kritik veriyi paralel olarak dedicated thread pool'da çeker.
     FastAPI'nin thread pool'unu işgal etmez — kullanıcı istekleri etkilenmez.
-    force=True → yfinance/CoinGecko'ya gider (Redis fallback'i atlar).
+    force=True → yfinance/Bigpara/CoinGecko'ya gider (Redis fallback'i atlar).
+
+    USDTRY: artık sadece doviz.warm_up içinde çekiliyor.
+    altin ve gumus, doviz modülünün cache'inden okur (duplicate yfinance yok).
+    BIST: bist.warm_up() Bigpara'ya istek atar; borsa kapalıysa kendi kendine döner.
     """
-    # BIST ve ABD burada YOK — kullanıcı isteğiyle Redis'e yazılıyor (24s TTL),
-    # background worker'a eklenirse günlük 10.000 Upstash komut limiti aşılır.
     loop = asyncio.get_event_loop()
     results = await asyncio.gather(
         loop.run_in_executor(_bg_executor, lambda: altin._fetch("GC=F", force=True)),
-        loop.run_in_executor(_bg_executor, lambda: altin._fetch("USDTRY=X", force=True)),
         loop.run_in_executor(_bg_executor, kripto.warm_up),
-        loop.run_in_executor(_bg_executor, doviz.warm_up),
+        loop.run_in_executor(_bg_executor, doviz.warm_up),       # USDTRY dahil
         loop.run_in_executor(_bg_executor, lambda: gumus.gumus_tl(force=True)),
+        loop.run_in_executor(_bg_executor, bist.warm_up),        # Bigpara, sadece borsa açıkken
+        loop.run_in_executor(_bg_executor, abd.warm_up),         # Top 6 ABD hissesi
         return_exceptions=True,
     )
     for name, r in zip(
-        ["altin/GC=F", "altin/USDTRY", "kripto", "doviz", "gumus"], results
+        ["altin/GC=F", "kripto", "doviz", "gumus", "bist", "abd"], results
     ):
         if isinstance(r, Exception):
             _logger.warning(f"BG fetch ✗ {name}: {r}")

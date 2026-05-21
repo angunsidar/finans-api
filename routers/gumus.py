@@ -125,6 +125,37 @@ def _coingecko_silver_usd() -> tuple[float | None, str]:
 
 
 def _usdtry_rate() -> float:
+    """
+    USD/TRY kurunu doviz modülünün cache'inden oku — duplicate yfinance çağrısı olmaz.
+    Fallback: doviz._cache → Redis → doviz._fetch_kur → yfinance XAG=X yan ürünü
+    """
+    # 1. doviz memory cache
+    try:
+        from routers import doviz as _doviz
+        cached = _doviz._cache_get("USDTRY=X")
+        if cached:
+            return cached["kur"]
+    except Exception:
+        pass
+
+    # 2. Redis
+    try:
+        from redis_cache import rget
+        rv = rget("finans:doviz:USDTRY=X")
+        if rv:
+            return rv["kur"]
+    except Exception:
+        pass
+
+    # 3. doviz._fetch_kur (yfinance + doviz cache'e yazar)
+    try:
+        from routers import doviz as _doviz
+        rv = _doviz._fetch_kur("USDTRY=X")
+        return rv["kur"]
+    except Exception:
+        pass
+
+    # 4. Son çare: yerel yfinance
     try:
         return _fetch_yf("USDTRY=X")["fiyat"]
     except Exception:
