@@ -288,7 +288,7 @@ def root():
     return RedirectResponse(url="/docs")
 
 
-@app.get("/health", tags=["meta"], summary="Servis durumu")
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["meta"], summary="Servis durumu")
 def health():
     """API key gerektirmez. Servis ayakta mı kontrol et."""
     return {"status": "ok", "version": "1.0.0"}
