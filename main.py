@@ -146,6 +146,8 @@ async def _fetch_all():
     FastAPI'nin thread pool'unu işgal etmez — kullanıcı istekleri etkilenmez.
     force=True → yfinance/CoinGecko'ya gider (Redis fallback'i atlar).
     """
+    # BIST ve ABD burada YOK — kullanıcı isteğiyle Redis'e yazılıyor (24s TTL),
+    # background worker'a eklenirse günlük 10.000 Upstash komut limiti aşılır.
     loop = asyncio.get_event_loop()
     results = await asyncio.gather(
         loop.run_in_executor(_bg_executor, lambda: altin._fetch("GC=F", force=True)),
@@ -153,12 +155,10 @@ async def _fetch_all():
         loop.run_in_executor(_bg_executor, kripto.warm_up),
         loop.run_in_executor(_bg_executor, doviz.warm_up),
         loop.run_in_executor(_bg_executor, lambda: gumus.gumus_tl(force=True)),
-        loop.run_in_executor(_bg_executor, bist.warm_up),
-        loop.run_in_executor(_bg_executor, abd.warm_up),
         return_exceptions=True,
     )
     for name, r in zip(
-        ["altin/GC=F", "altin/USDTRY", "kripto", "doviz", "gumus", "bist", "abd"], results
+        ["altin/GC=F", "altin/USDTRY", "kripto", "doviz", "gumus"], results
     ):
         if isinstance(r, Exception):
             _logger.warning(f"BG fetch ✗ {name}: {r}")
