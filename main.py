@@ -306,3 +306,90 @@ def root():
 def health():
     """API key gerektirmez. Servis ayakta mı kontrol et."""
     return {"status": "ok", "version": "1.0.0"}
+
+
+@app.get("/snapshot", tags=["meta"], summary="App açılış verisi — tek istekte her şey")
+def snapshot(
+    bist: str = Query("", description="BIST sembolleri virgülle. Örn: THYAO,AKBNK,GARAN"),
+    abd:  str = Query("", description="ABD sembolleri virgülle. Örn: AAPL,MSFT"),
+    doviz: str = Query("USD,EUR,GBP", description="Döviz kodları virgülle. Örn: USD,EUR,GBP"),
+):
+    """
+    Uygulamanın açılışında ihtiyaç duyduğu tüm fiyatları TEK Redis çağrısında döndürür.
+
+    - `altin`  → /altin/tl ile aynı veri (GC=F × USDTRY, gram + ons)
+    - `gumus`  → /gumus/tl ile aynı veri
+    - `doviz`  → istenen döviz/TL kurları
+    - `bist`   → portföydeki BIST hisseleri
+    - `abd`    → portföydeki ABD hisseleri
+
+    Tüm veriler Redis'te önceden hesaplanmış olduğunda yanıt süresi <10ms'dir.
+    Redis cache boş olan semboller için ilgili endpoint fallback zincirini çalıştırır.
+    """
+    from redis_cache import rget_many
+
+    bist_liste  = [s.strip().upper() for s in bist.split(",")  if s.strip()][:50]
+    abd_liste   = [s.strip().upper() for s in abd.split(",")   if s.strip()][:20]
+    doviz_liste = [d.strip().upper() for d in doviz.split(",") if d.strip()][:15]
+
+    # Tek Redis MGET ile hepsini çek
+    keys = (
+        ["finans:altin:tl", "finans:gumus:tl"]
+        + [f"finans:doviz:{d}TRY=X" for d in doviz_liste]
+        + [f"finans:bist:{s}"       for s in bist_liste]
+        + [f"finans:abd:{s}"        for s in abd_liste]
+    )
+    data = rget_many(keys) if keys else {}
+
+    # Eksik veriler için fallback (Redis miss durumu)
+    altin_data = data.get("finans:altin:tl")
+    if altin_data is None:
+        try:
+            altin_data = altin.altin_tl_hesapla(force=False)
+        except Exception:
+            altin_data = altin._stale.get("__tl__")
+
+    gumus_data = data.get("finans:gumus:tl")
+    if gumus_data is None:
+        try:
+            gumus_data = gumus.gumus_tl(force=False)
+        except Exception:
+            gumus_data = gumus._stale.get("tl")
+
+    doviz_data: dict = {}
+    for d in doviz_liste:
+        v = data.get(f"finans:doviz:{d}TRY=X")
+        if v is None:
+            try:
+                v = doviz._fetch_kur(f"{d}TRY=X")
+            except Exception:
+                v = None
+        doviz_data[d] = v
+
+    bist_data: dict = {}
+    bist_miss = [s for s in bist_liste if data.get(f"finans:bist:{s}") is None]
+    for s in bist_liste:
+        bist_data[s] = data.get(f"finans:bist:{s}")
+    for s in bist_miss:
+        try:
+            bist_data[s] = bist._fetch_info(s)
+        except Exception:
+            bist_data[s] = None
+
+    abd_data: dict = {}
+    abd_miss = [s for s in abd_liste if data.get(f"finans:abd:{s}") is None]
+    for s in abd_liste:
+        abd_data[s] = data.get(f"finans:abd:{s}")
+    for s in abd_miss:
+        try:
+            abd_data[s] = abd._fetch(s)
+        except Exception:
+            abd_data[s] = None
+
+    return {
+        "altin":  altin_data,
+        "gumus":  gumus_data,
+        "doviz":  doviz_data,
+        "bist":   bist_data,
+        "abd":    abd_data,
+    }

@@ -444,21 +444,53 @@ def endeks_fiyat(sembol: str):
 def toplu_fiyat(
     semboller: str = Query(..., description="Virgülle ayrılmış semboller. Örn: THYAO,AKBNK,GARAN")
 ):
-    """Birden fazla hisseyi tek sorguda getir. Piyasa açıksa Bigpara batch kullanır."""
+    """
+    Birden fazla hisseyi tek sorguda getir.
+    Önce memory cache, sonra Redis MGET (tek tur), son olarak Bigpara/yfinance.
+    """
     liste = [s.strip().upper() for s in semboller.split(",") if s.strip()]
     if not liste:
         raise HTTPException(400, "En az bir sembol giriniz.")
     if len(liste) > 50:
         raise HTTPException(400, "En fazla 50 sembol sorgulanabilir.")
 
-    sonuclar = []
-    for sembol in liste:
-        try:
-            sonuclar.append(_fetch_info(sembol))
-        except HTTPException:
-            sonuclar.append({"sembol": sembol, "hata": "veri bulunamadı"})
+    bulunanlar: dict[str, dict] = {}
+    eksikler: list[str] = []
 
-    return {"sayı": len(sonuclar), "veriler": sonuclar}
+    # 1. Memory cache — sıfır maliyet
+    for sembol in liste:
+        cached = _cache_get(sembol)
+        if cached:
+            bulunanlar[sembol] = cached
+        else:
+            eksikler.append(sembol)
+
+    # 2. Redis MGET — tek tur, tüm eksikler
+    if eksikler:
+        from redis_cache import rget_many
+        redis_vals = rget_many([f"finans:bist:{s}" for s in eksikler])
+        hala_eksik: list[str] = []
+        now = time.time()
+        for s in eksikler:
+            v = redis_vals.get(f"finans:bist:{s}")
+            if v:
+                _cache[s] = (now, v)
+                _stale[s] = v
+                bulunanlar[s] = v
+            else:
+                hala_eksik.append(s)
+
+        # 3. Yalnızca Redis'te olmayan hisseler için bireysel çekim
+        for s in hala_eksik:
+            try:
+                bulunanlar[s] = _fetch_info(s)
+            except HTTPException:
+                bulunanlar[s] = {"sembol": s, "hata": "veri bulunamadı"}
+
+    return {
+        "sayı": len(liste),
+        "veriler": [bulunanlar.get(s, {"sembol": s, "hata": "bulunamadı"}) for s in liste],
+    }
 
 
 @router.get("/piyasa", summary="Piyasa durum bilgisi")

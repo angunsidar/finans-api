@@ -212,19 +212,54 @@ def abd_endeks(sembol: str):
 def abd_toplu(
     semboller: str = Query(..., description="Virgülle ayrılmış semboller. Örn: AAPL,TSLA,NVDA")
 ):
-    """Birden fazla ABD hissesini tek sorguda getir (cache'li, max 20)."""
+    """
+    Birden fazla ABD hissesini tek sorguda getir.
+    Önce memory cache, sonra Redis MGET (tek tur), son olarak yfinance.
+    """
     liste = [s.strip().upper() for s in semboller.split(",") if s.strip()]
     if not liste:
         raise HTTPException(400, "En az bir sembol giriniz.")
     if len(liste) > 20:
         raise HTTPException(400, "En fazla 20 sembol sorgulanabilir.")
-    sonuclar = []
+
+    bulunanlar: dict[str, dict] = {}
+    eksikler: list[str] = []
+
+    # 1. Memory cache
     for s in liste:
-        try:
-            sonuclar.append(_fetch(s))
-        except HTTPException:
-            sonuclar.append({"sembol": s, "hata": "bulunamadı"})
-    return {"sayı": len(sonuclar), "para_birimi": "USD", "veriler": sonuclar}
+        cached = _cache_get(s)
+        if cached:
+            bulunanlar[s] = cached
+        else:
+            eksikler.append(s)
+
+    # 2. Redis MGET — tek tur
+    if eksikler:
+        from redis_cache import rget_many
+        redis_vals = rget_many([f"finans:abd:{s}" for s in eksikler])
+        hala_eksik: list[str] = []
+        now = time.time()
+        for s in eksikler:
+            v = redis_vals.get(f"finans:abd:{s}")
+            if v:
+                _cache[s] = (now, v)
+                _stale[s] = v
+                bulunanlar[s] = v
+            else:
+                hala_eksik.append(s)
+
+        # 3. Yalnızca Redis'te olmayanlar için yfinance
+        for s in hala_eksik:
+            try:
+                bulunanlar[s] = _fetch(s)
+            except HTTPException:
+                bulunanlar[s] = {"sembol": s, "hata": "bulunamadı"}
+
+    return {
+        "sayı": len(liste),
+        "para_birimi": "USD",
+        "veriler": [bulunanlar.get(s, {"sembol": s, "hata": "bulunamadı"}) for s in liste],
+    }
 
 
 @router.get("/etf/{sembol}", summary="ETF fiyatı")
