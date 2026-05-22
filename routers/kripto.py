@@ -135,9 +135,9 @@ def _get_coin_price(coin_id: str, vs: str = "usd,try") -> dict | None:
         _coin_cache[coin_id] = (now, redis_val)
         _coin_stale[coin_id] = redis_val
         return redis_val
-    # 3. Redis miss → bg fetch, stale döndür
+    # 3. Redis miss → bg fetch, stale veya boş dict döndür
     _bg_fetch_kripto([coin_id], vs)
-    return _coin_stale.get(coin_id)
+    return _coin_stale.get(coin_id) or {}
 
 
 def _get_coins_bulk(coin_ids: list[str], vs: str = "usd,try") -> dict[str, dict]:

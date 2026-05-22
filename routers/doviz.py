@@ -119,9 +119,9 @@ def _fetch_kur(sembol: str, force: bool = False) -> dict | None:
             _cache[sembol] = (time.time(), redis_val)
             _stale[sembol] = redis_val
             return redis_val
-        # 3. Redis miss → arka planda çek
+        # 3. Redis miss → arka planda çek, stale veya boş dict döndür
         _bg_fetch_doviz(sembol)
-        return _stale.get(sembol)
+        return _stale.get(sembol) or {"kur": None, "bekleniyor": True}
 
     # force=True → warm_up / background worker
     try:

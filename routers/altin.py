@@ -100,9 +100,9 @@ def _fetch(sembol: str, force: bool = False) -> dict | None:
             _cache[sembol] = (time.time(), redis_val)
             _stale[sembol] = redis_val
             return redis_val
-        # 3. Redis miss → bg fetch, stale döndür
+        # 3. Redis miss → bg fetch, stale veya boş dict döndür
         _bg_fetch_altin(sembol)
-        return _stale.get(sembol)
+        return _stale.get(sembol) or {"fiyat": None, "bekleniyor": True}
 
     # force=True → background worker
     try:
