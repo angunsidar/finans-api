@@ -34,7 +34,7 @@ def _get_client():
             host=_HOST,
             port=_PORT,
             password=_PASSWORD,
-            ssl=True,
+            ssl=False,
             decode_responses=True,
             socket_connect_timeout=3,
             socket_timeout=3,
