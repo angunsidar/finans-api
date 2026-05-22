@@ -15,7 +15,7 @@ import concurrent.futures
 import logging
 import time
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
