@@ -5,6 +5,7 @@ Rate-limit koruması: 15 dakika TTL cache + Coinbase fallback.
 """
 from __future__ import annotations
 
+import threading
 import time
 import traceback
 import requests
@@ -47,21 +48,63 @@ def _cache_set(key: str, val: dict):
 
 
 # ── yfinance ─────────────────────────────────────────────────────────────────
-def _fetch(sembol: str, force: bool = False) -> dict:
+_bg_in_progress: set[str] = set()
+
+
+def _bg_fetch_altin(sembol: str) -> None:
+    """Redis miss: arka planda yfinance'den çek, cache'e yaz."""
+    if sembol in _bg_in_progress:
+        return
+    _bg_in_progress.add(sembol)
+
+    def _run():
+        try:
+            tick = yf.Ticker(sembol)
+            hist = tick.history(period="2d")
+            if hist.empty:
+                return
+            son = hist.iloc[-1]
+            onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
+            kapanis = round(float(son["Close"]), 4)
+            onceki_kapanis = float(onceki["Close"])
+            degisim = round(kapanis - onceki_kapanis, 4)
+            degisim_yuzde = round((degisim / onceki_kapanis) * 100, 2) if onceki_kapanis else 0
+            result = {
+                "fiyat": kapanis,
+                "acilis": round(float(son["Open"]), 4),
+                "yuksek": round(float(son["High"]), 4),
+                "dusuk": round(float(son["Low"]), 4),
+                "degisim": degisim,
+                "degisim_yuzde": degisim_yuzde,
+                "tarih": str(hist.index[-1].date()),
+            }
+            _cache_set(sembol, result)
+        except Exception:
+            pass
+        finally:
+            _bg_in_progress.discard(sembol)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _fetch(sembol: str, force: bool = False) -> dict | None:
     if not force:
         # 1. Memory cache
         cached = _cache_get(sembol)
         if cached:
             return cached
-        # 2. Redis fallback
+        # 2. Redis
         from redis_cache import rget
         redis_val = rget(f"finans:altin:{sembol}")
         if redis_val:
             _cache[sembol] = (time.time(), redis_val)
             _stale[sembol] = redis_val
             return redis_val
+        # 3. Redis miss → bg fetch, stale döndür
+        _bg_fetch_altin(sembol)
+        return _stale.get(sembol)
 
-    # 3. yfinance
+    # force=True → background worker
     try:
         tick = yf.Ticker(sembol)
         hist = tick.history(period="2d")
@@ -84,11 +127,8 @@ def _fetch(sembol: str, force: bool = False) -> dict:
         }
         _cache_set(sembol, result)
         return result
-    except Exception as e:
-        # yfinance hata verdi — stale veri varsa onu döndür
-        if sembol in _stale:
-            return _stale[sembol]
-        raise  # stale da yoksa (ilk istek) hatayı ilet
+    except Exception:
+        return _stale.get(sembol)
 
 
 # ── USDTRY paylaşımlı çekim — doviz modülünden okur ─────────────────────────

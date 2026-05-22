@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import concurrent.futures as _cf
 import logging
+import threading
 import time
 import requests
 import yfinance as yf
@@ -265,7 +266,32 @@ def _fetch_yfinance(sembol: str) -> dict:
     }
 
 
-def _fetch_info(sembol: str, force: bool = False) -> dict:
+_bg_in_progress: set[str] = set()
+
+
+def _bg_fetch_bist(sembol: str) -> None:
+    """Redis miss: arka planda çek, cache'e yaz. Kullanıcı beklemez."""
+    if sembol in _bg_in_progress:
+        return
+    _bg_in_progress.add(sembol)
+
+    def _run():
+        try:
+            if _bist_acik():
+                result = _fetch_bigpara_single(sembol)
+            else:
+                result = _fetch_yfinance(sembol)
+            _cache_set(sembol, result)
+            _logger.debug(f"BG bist ✓ {sembol}")
+        except Exception as e:
+            _logger.debug(f"BG bist ✗ {sembol}: {e}")
+        finally:
+            _bg_in_progress.discard(sembol)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _fetch_info(sembol: str, force: bool = False) -> dict | None:
     key = sembol.upper()
 
     if not force:
@@ -273,43 +299,36 @@ def _fetch_info(sembol: str, force: bool = False) -> dict:
         cached = _cache_get(key)
         if cached:
             return cached
-
-        # 2. Redis — yfinance/Bigpara'ya gitmeden
+        # 2. Redis
         from redis_cache import rget
         redis_val = rget(f"finans:bist:{key}")
         if redis_val:
             _cache[key] = (time.time(), redis_val)
             _stale[key] = redis_val
             return redis_val
+        # 3. Redis miss → arka planda çek, stale varsa döndür (kullanıcı beklemez)
+        _bg_fetch_bist(key)
+        return _stale.get(key)
 
-    # 3. Piyasa açıksa Bigpara batch cache'ini dene
+    # force=True → background worker çağrısı, doğrudan kaynaklardan çek
     if _bist_acik():
-        # 3a. Toplu cache yeterlince tazeyse oradan al
-        if not force and _bigpara_data and (time.time() - _bigpara_ts) < _BIGPARA_TTL:
+        if _bigpara_data and (time.time() - _bigpara_ts) < _BIGPARA_TTL:
             if key in _bigpara_data:
                 veri = _bigpara_data[key]
                 _cache_set(key, veri)
                 return veri
-
-        # 3b. Tek sembol Bigpara isteği
         try:
             result = _fetch_bigpara_single(key)
             _cache_set(key, result)
             return result
         except Exception as e:
             _logger.warning(f"Bigpara single hata ({key}): {e}")
-
-    # 4. yfinance fallback
     try:
         result = _fetch_yfinance(key)
         _cache_set(key, result)
         return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        if key in _stale:
-            return _stale[key]
-        raise HTTPException(503, f"Veri alınamadı: {key} — {e}")
+    except Exception:
+        return _stale.get(key)
 
 
 def warm_up() -> list[str]:
@@ -355,9 +374,13 @@ def liste():
     }
 
 
+_BEKLENIYOR = lambda s: {"sembol": s, "fiyat": None, "durum": "bekleniyor", "para_birimi": "TRY"}
+
+
 @router.get("/hisse/{sembol}", summary="Anlık hisse fiyatı")
 def hisse_fiyat(sembol: str):
-    return _fetch_info(sembol)
+    result = _fetch_info(sembol)
+    return result if result is not None else _BEKLENIYOR(sembol.upper())
 
 
 @router.get("/hisse/{sembol}/gecmis", summary="Geçmiş fiyat verisi")
@@ -480,12 +503,10 @@ def toplu_fiyat(
             else:
                 hala_eksik.append(s)
 
-        # 3. Yalnızca Redis'te olmayan hisseler için bireysel çekim
+        # 3. Yalnızca Redis'te olmayan hisseler — bg fetch tetikle, stale veya bekleniyor döndür
         for s in hala_eksik:
-            try:
-                bulunanlar[s] = _fetch_info(s)
-            except HTTPException:
-                bulunanlar[s] = {"sembol": s, "hata": "veri bulunamadı"}
+            result = _fetch_info(s)
+            bulunanlar[s] = result if result is not None else _BEKLENIYOR(s)
 
     return {
         "sayı": len(liste),

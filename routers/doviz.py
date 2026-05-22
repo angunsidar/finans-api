@@ -5,6 +5,7 @@ yfinance — Yahoo Finance currency pairs (=X suffix).
 """
 from __future__ import annotations
 
+import threading
 import time
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
@@ -65,22 +66,64 @@ CAPRAZ_KURLAR: dict[str, str] = {
 WARM_DOVIZLER = ["USD", "EUR", "GBP", "CHF", "JPY", "AUD", "CAD"]
 
 
-def _fetch_kur(sembol: str, force: bool = False) -> dict:
-    """Cache'li yfinance döviz çekimi. Hata varsa stale döner."""
+_bg_in_progress: set[str] = set()
+
+
+def _bg_fetch_doviz(sembol: str) -> None:
+    """Redis miss: arka planda yfinance'den çek, cache'e yaz."""
+    if sembol in _bg_in_progress:
+        return
+    _bg_in_progress.add(sembol)
+
+    def _run():
+        try:
+            tick = yf.Ticker(sembol)
+            hist = tick.history(period="2d")
+            if hist.empty:
+                return
+            son = hist.iloc[-1]
+            onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
+            kapanis = round(float(son["Close"]), 6)
+            onceki_kapanis = float(onceki["Close"])
+            degisim = round(kapanis - onceki_kapanis, 6)
+            degisim_yuzde = round((degisim / onceki_kapanis) * 100, 4) if onceki_kapanis else 0
+            result = {
+                "kur": kapanis,
+                "degisim": degisim,
+                "degisim_yuzde": degisim_yuzde,
+                "acilis": round(float(son["Open"]), 6),
+                "yuksek": round(float(son["High"]), 6),
+                "dusuk": round(float(son["Low"]), 6),
+                "tarih": str(hist.index[-1].date()),
+            }
+            _cache_set(sembol, result)
+        except Exception:
+            pass
+        finally:
+            _bg_in_progress.discard(sembol)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _fetch_kur(sembol: str, force: bool = False) -> dict | None:
+    """Redis-first döviz çekimi. force=False → asla yfinance bekletmez."""
     if not force:
         # 1. Memory cache
         cached = _cache_get(sembol)
         if cached:
             return cached
-        # 2. Redis fallback
+        # 2. Redis
         from redis_cache import rget
         redis_val = rget(f"finans:doviz:{sembol}")
         if redis_val:
             _cache[sembol] = (time.time(), redis_val)
             _stale[sembol] = redis_val
             return redis_val
+        # 3. Redis miss → arka planda çek
+        _bg_fetch_doviz(sembol)
+        return _stale.get(sembol)
 
-    # 3. yfinance
+    # force=True → warm_up / background worker
     try:
         tick = yf.Ticker(sembol)
         hist = tick.history(period="2d")
@@ -106,9 +149,7 @@ def _fetch_kur(sembol: str, force: bool = False) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        if sembol in _stale:
-            return _stale[sembol]
-        raise HTTPException(503, f"Döviz verisi alınamadı: {sembol} — {e}")
+        return _stale.get(sembol)
 
 
 def warm_up():

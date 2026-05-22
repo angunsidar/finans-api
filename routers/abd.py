@@ -5,6 +5,7 @@ yfinance — NYSE, NASDAQ, AMEX.
 """
 from __future__ import annotations
 
+import threading
 import time
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
@@ -74,7 +75,53 @@ def _cache_set(key: str, val: dict):
     rset(f"finans:abd:{key}", val)
 
 
-def _fetch(sembol: str, force: bool = False) -> dict:
+_bg_in_progress: set[str] = set()
+
+
+def _bg_fetch_abd(sembol: str) -> None:
+    """Redis miss: arka planda yfinance'den çek, cache'e yaz."""
+    if sembol in _bg_in_progress:
+        return
+    _bg_in_progress.add(sembol)
+
+    def _run():
+        try:
+            tick = yf.Ticker(sembol)
+            hist = tick.history(period="1d", interval="2m")
+            hist = hist.dropna(subset=["Close"]) if not hist.empty else hist
+            if hist.empty:
+                hist = tick.history(period="5d")
+                hist = hist.dropna(subset=["Close"])
+            if hist.empty:
+                return
+            son = hist.iloc[-1]
+            onceki = hist.iloc[-2] if len(hist) > 1 else hist.iloc[-1]
+            kapanis = round(float(son["Close"]), 4)
+            onceki_kapanis = float(onceki["Close"])
+            degisim = round(kapanis - onceki_kapanis, 4)
+            degisim_yuzde = round((degisim / onceki_kapanis) * 100, 2) if onceki_kapanis else 0
+            result = {
+                "sembol": sembol,
+                "fiyat": kapanis,
+                "acilis": round(float(son["Open"]), 4),
+                "yuksek": round(float(son["High"]), 4),
+                "dusuk": round(float(son["Low"]), 4),
+                "hacim": int(son["Volume"]),
+                "degisim_usd": degisim,
+                "degisim_yuzde": degisim_yuzde,
+                "para_birimi": "USD",
+                "tarih": str(hist.index[-1].date()),
+            }
+            _cache_set(sembol, result)
+        except Exception as e:
+            pass
+        finally:
+            _bg_in_progress.discard(sembol)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _fetch(sembol: str, force: bool = False) -> dict | None:
     key = sembol.upper()
 
     if not force:
@@ -82,27 +129,25 @@ def _fetch(sembol: str, force: bool = False) -> dict:
         cached = _cache_get(key)
         if cached:
             return cached
-        # 2. Redis fallback — yfinance'e gitmeden önce
+        # 2. Redis
         from redis_cache import rget
         redis_val = rget(f"finans:abd:{key}")
         if redis_val:
             _cache[key] = (time.time(), redis_val)
             _stale[key] = redis_val
             return redis_val
+        # 3. Redis miss → arka planda çek, stale varsa döndür
+        _bg_fetch_abd(key)
+        return _stale.get(key)
 
-    # 3. yfinance (force=True veya Redis de boşsa)
+    # force=True → background worker
     try:
         tick = yf.Ticker(sembol.upper())
-
-        # Önce intraday dene → gün içi anlık fiyat (15 dk gecikme)
         hist = tick.history(period="1d", interval="2m")
         hist = hist.dropna(subset=["Close"]) if not hist.empty else hist
-
-        # Intraday boşsa (borsa kapalı, hafta sonu) → günlük geçmişe düş
         if hist.empty:
             hist = tick.history(period="5d")
             hist = hist.dropna(subset=["Close"])
-
         if hist.empty:
             raise HTTPException(404, f"Hisse bulunamadı: {sembol}")
         son = hist.iloc[-1]
@@ -125,13 +170,10 @@ def _fetch(sembol: str, force: bool = False) -> dict:
         }
         _cache_set(key, result)
         return result
-
     except HTTPException:
         raise
-    except Exception as e:
-        if key in _stale:
-            return _stale[key]
-        raise HTTPException(503, f"Veri alınamadı: {sembol.upper()} — {e}")
+    except Exception:
+        return _stale.get(key)
 
 
 # Top 6 popüler ABD hissesi — background worker ısıtır (AAPL, MSFT, NVDA, GOOGL, AMZN, META)
@@ -161,9 +203,13 @@ def abd_liste():
     }
 
 
+_BEKLENIYOR = lambda s: {"sembol": s, "fiyat": None, "durum": "bekleniyor", "para_birimi": "USD"}
+
+
 @router.get("/hisse/{sembol}", summary="ABD hisse fiyatı")
 def abd_hisse(sembol: str):
-    return _fetch(sembol.upper())
+    result = _fetch(sembol.upper())
+    return result if result is not None else _BEKLENIYOR(sembol.upper())
 
 
 @router.get("/hisse/{sembol}/gecmis", summary="ABD hisse geçmiş")
@@ -248,12 +294,10 @@ def abd_toplu(
             else:
                 hala_eksik.append(s)
 
-        # 3. Yalnızca Redis'te olmayanlar için yfinance
+        # 3. Redis'te olmayanlar — bg fetch tetikle
         for s in hala_eksik:
-            try:
-                bulunanlar[s] = _fetch(s)
-            except HTTPException:
-                bulunanlar[s] = {"sembol": s, "hata": "bulunamadı"}
+            result = _fetch(s)
+            bulunanlar[s] = result if result is not None else _BEKLENIYOR(s)
 
     return {
         "sayı": len(liste),

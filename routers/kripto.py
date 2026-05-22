@@ -10,6 +10,7 @@ Cache mimarisi:
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Optional
 
@@ -92,33 +93,51 @@ def _fetch_coins_from_api(ids: list[str], vs: str) -> dict[str, dict]:
     return r.json()  # {coin_id: {"usd": ..., "try": ..., ...}}
 
 
-def _get_coin_price(coin_id: str, vs: str = "usd,try") -> dict:
-    """
-    Tek coin fiyatını per-coin cache üzerinden al.
-    Hata varsa stale döner; stale da yoksa hata fırlatır.
-    """
+_bg_in_progress: set[str] = set()
+
+
+def _bg_fetch_kripto(coin_ids: list[str], vs: str = "usd,try") -> None:
+    """Redis miss: arka planda CoinGecko'dan çek, cache'e yaz."""
+    key = ",".join(sorted(coin_ids))
+    if key in _bg_in_progress:
+        return
+    _bg_in_progress.add(key)
+
+    def _run():
+        try:
+            data = _fetch_coins_from_api(coin_ids, vs)
+            now = time.time()
+            from redis_cache import rset
+            for cid, raw in data.items():
+                _coin_cache[cid] = (now, raw)
+                _coin_stale[cid] = raw
+                rset(f"finans:kripto:{cid}", raw)
+        except Exception:
+            pass
+        finally:
+            _bg_in_progress.discard(key)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _get_coin_price(coin_id: str, vs: str = "usd,try") -> dict | None:
+    """Redis-first tek coin fiyatı. Miss → bg fetch, stale döner."""
     now = time.time()
+    # 1. Memory cache
     if coin_id in _coin_cache:
         ts, data = _coin_cache[coin_id]
         if now - ts < _COIN_TTL:
             return data
-
-    # TTL doldu veya hiç çekilmedi — taze veri dene
-    try:
-        result = _fetch_coins_from_api([coin_id], vs)
-        if coin_id in result:
-            _coin_cache[coin_id] = (now, result[coin_id])
-            _coin_stale[coin_id] = result[coin_id]
-            return result[coin_id]
-        raise HTTPException(404, f"Kripto para bulunamadı: {coin_id}")
-    except HTTPException:
-        if coin_id in _coin_stale:
-            return _coin_stale[coin_id]
-        raise
-    except Exception as e:
-        if coin_id in _coin_stale:
-            return _coin_stale[coin_id]
-        raise HTTPException(503, f"CoinGecko erişilemiyor: {e}")
+    # 2. Redis
+    from redis_cache import rget
+    redis_val = rget(f"finans:kripto:{coin_id}")
+    if redis_val:
+        _coin_cache[coin_id] = (now, redis_val)
+        _coin_stale[coin_id] = redis_val
+        return redis_val
+    # 3. Redis miss → bg fetch, stale döndür
+    _bg_fetch_kripto([coin_id], vs)
+    return _coin_stale.get(coin_id)
 
 
 def _get_coins_bulk(coin_ids: list[str], vs: str = "usd,try") -> dict[str, dict]:
@@ -142,21 +161,22 @@ def _get_coins_bulk(coin_ids: list[str], vs: str = "usd,try") -> dict[str, dict]
         to_fetch.append(coin_id)
 
     if to_fetch:
-        try:
-            fresh = _fetch_coins_from_api(to_fetch, vs)
-            from redis_cache import rset
-            for cid, data in fresh.items():
-                _coin_cache[cid] = (now, data)
-                _coin_stale[cid] = data
-                result[cid] = data
-                rset(f"finans:kripto:{cid}", data)
-            # API'den gelmeyen coin'ler için stale'e bak
-            for cid in to_fetch:
-                if cid not in result and cid in _coin_stale:
-                    result[cid] = _coin_stale[cid]
-        except Exception:
-            # Tüm fetch başarısız — stale'e düş
-            for cid in to_fetch:
+        # Redis check for misses
+        from redis_cache import rget_many
+        redis_vals = rget_many([f"finans:kripto:{c}" for c in to_fetch])
+        still_missing = []
+        for cid in to_fetch:
+            rv = redis_vals.get(f"finans:kripto:{cid}")
+            if rv:
+                _coin_cache[cid] = (now, rv)
+                _coin_stale[cid] = rv
+                result[cid] = rv
+            else:
+                still_missing.append(cid)
+        # Gerçek miss → bg fetch tetikle, stale döndür
+        if still_missing:
+            _bg_fetch_kripto(still_missing, vs)
+            for cid in still_missing:
                 if cid in _coin_stale:
                     result[cid] = _coin_stale[cid]
 
