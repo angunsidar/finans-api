@@ -101,8 +101,22 @@ def _tarih_aralik() -> tuple[str, str]:
     return fmt(baslangic), fmt(bugun)
 
 
-def _fetch_tefas(kod: str) -> dict:
-    """TEFAS'tan tek fon için güncel birim pay değeri çek."""
+def _tefas_session() -> requests.Session:
+    """
+    TEFAS için cookie'li oturum aç.
+    Ana sayfa bir kez yüklenir → ASP.NET session cookie'si alınır.
+    Bu cookie olmadan BindHistoryInfo boş data döndürür.
+    """
+    s = requests.Session()
+    s.get("https://www.tefas.gov.tr/TarihselVeriler.aspx", headers=_HEADERS, timeout=10)
+    return s
+
+
+def _fetch_tefas(kod: str, session: requests.Session | None = None) -> dict:
+    """
+    TEFAS'tan tek fon için güncel birim pay değeri çek.
+    session parametresi verilirse tekrar cookie alınmaz (toplu çekimde bunu kullan).
+    """
     bas, bit = _tarih_aralik()
     payload = {
         "fontip": "YAT",
@@ -110,7 +124,8 @@ def _fetch_tefas(kod: str) -> dict:
         "bastarih": bas,
         "bittarih": bit,
     }
-    resp = requests.post(_TEFAS_URL, data=payload, headers=_HEADERS, timeout=15)
+    s = session or _tefas_session()
+    resp = s.post(_TEFAS_URL, data=payload, headers=_HEADERS, timeout=15)
     resp.raise_for_status()
 
     rows = resp.json().get("data", [])
@@ -206,13 +221,20 @@ def warm_up() -> list[str]:
         _logger.info("Fon warm_up atlandı — saat 10:30 öncesi")
         return list(_stale.keys())
 
+    # Tek session → bir kez cookie al, tüm fonlara kullan (8 fon = 1+8 istek, 16 değil)
+    try:
+        session = _tefas_session()
+    except Exception as e:
+        _logger.warning(f"Fon warm_up: TEFAS session açılamadı: {e}")
+        return list(_stale.keys())
+
     basarili: list[str] = []
     for kod in POPULER_FONLAR:
         if _bugunun_verisi_var_mi(kod):
             basarili.append(kod)
             continue
         try:
-            result = _fetch_tefas(kod)
+            result = _fetch_tefas(kod, session=session)
             _cache_set(kod, result)
             basarili.append(kod)
             _logger.debug(f"Fon warm_up ✓ {kod}")
