@@ -303,7 +303,8 @@ def toplu_fiyat(
 def seed_fon(payload: dict, request: Request):
     """
     GitHub Actions daily job'ı tarafından çağrılır (her iş günü 10:35 İstanbul).
-    TEFAS'tan çekilen fon verilerini Redis + bellek cache'e yazar.
+    Fintables.com'dan çekilen fon verilerini Redis + bellek cache'e yazar.
+    Payload'da yield_1m/3m/6m/ytd/1y/3y/5y alanları da kabul edilir.
     X-API-Key header gereklidir.
     """
     veriler = payload.get("veriler", [])
@@ -314,7 +315,10 @@ def seed_fon(payload: dict, request: Request):
     now = time.time()
     for item in veriler:
         kod = str(item.get("kod", "")).strip().upper()
-        if not kod or not item.get("fiyat"):
+        if not kod:
+            continue
+        # fiyat 0.0 olabilir (fintables birim fiyat vermiyor) — yine de kaydet
+        if item.get("fiyat") is None and item.get("yield_1m") is None:
             continue
         _cache[kod] = (now, item)
         _stale[kod] = item
