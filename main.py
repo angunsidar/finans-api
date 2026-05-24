@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from routers import bist, kripto, altin, doviz, abd, evren, gumus
+from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon
 
 _logger = logging.getLogger("uvicorn.error")
 
@@ -54,6 +54,7 @@ async def _warm_caches():
     redis_doviz  = rget_many([f"finans:doviz:{k}"  for k in doviz_keys])
     redis_kripto = rget_many([f"finans:kripto:{c}" for c in kripto_coins])
     redis_gumus  = rget_many(["finans:gumus:tl"])
+    redis_fon    = rget_prefix("finans:fon:")
 
     from redis_cache import rget_prefix
     redis_bist = rget_prefix("finans:bist:")
@@ -105,6 +106,12 @@ async def _warm_caches():
             abd._stale[sembol] = val
             abd._cache[sembol] = (now, val)
             loaded += 1
+    for rk, val in redis_fon.items():
+        if val:
+            kod = rk.replace("finans:fon:", "")
+            fon._stale[kod] = val
+            fon._cache[kod] = (now, val)
+            loaded += 1
 
     _logger.info(f"Redis pre-load: {loaded} key yüklendi → _cache + _stale dolu, ilk istek <10ms")
 
@@ -149,6 +156,15 @@ async def _warm_caches():
     except Exception as e:
         _logger.warning(f"Warm-up ✗ gumus: {e}")
 
+    await asyncio.sleep(1)
+
+    # Fonlar — TEFAS günde bir yayınlar, 24 saat cache'de kalır
+    try:
+        basarili = fon.warm_up()
+        _logger.info(f"Warm-up ✓ fon: {basarili}")
+    except Exception as e:
+        _logger.warning(f"Warm-up ✗ fon: {e}")
+
 
 async def _fetch_all():
     """
@@ -169,10 +185,11 @@ async def _fetch_all():
         loop.run_in_executor(_bg_executor, lambda: gumus.gumus_tl(force=True)),
         loop.run_in_executor(_bg_executor, bist.warm_up),        # Bigpara, sadece borsa açıkken
         loop.run_in_executor(_bg_executor, abd.warm_up),         # Top 6 ABD hissesi
+        loop.run_in_executor(_bg_executor, fon.warm_up),         # TEFAS, 24h TTL — gün içi tekrar gitmez
         return_exceptions=True,
     )
     for name, r in zip(
-        ["altin/GC=F", "altin/tl", "kripto", "doviz", "gumus", "bist", "abd"], results
+        ["altin/GC=F", "altin/tl", "kripto", "doviz", "gumus", "bist", "abd", "fon"], results
     ):
         if isinstance(r, Exception):
             _logger.warning(f"BG fetch ✗ {name}: {r}")
@@ -294,6 +311,7 @@ app.include_router(doviz.router)
 app.include_router(abd.router)
 app.include_router(evren.router)
 app.include_router(gumus.router)
+app.include_router(fon.router)
 
 
 # ─── Genel Endpoints ──────────────────────────────────────────────────────────
