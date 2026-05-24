@@ -1,18 +1,17 @@
 """
-Türk yatırım fonu (TEFAS) endpoint'leri.
-Birincil kaynak: TEFAS resmi web servisi (BindHistoryInfo)
+Türk yatırım fonu endpoint'leri.
+Veri kaynağı: Bigpara fon listesi API (aynı Bigpara BIST için kullandığımız pattern)
   - Birim pay değeri (NAV), günlük getiri, fon adı
-  - TEFAS her iş günü ~10:30 İstanbul saatinde önceki günün değerini yayınlar
+  - Bigpara fon verisi her iş günü ~10:30 İstanbul saatinde güncellenir
 
 Çekme zamanı:
-  - Saat 10:30 öncesi → TEFAS'a gidilmez, stale/Redis veri döndürülür
-  - Saat 10:30 sonrası → bugünün verisi yoksa TEFAS'tan çekilir
+  - Saat 10:30 öncesi → Bigpara'ya gidilmez, stale/Redis veri döndürülür
+  - Saat 10:30 sonrası → bugünün verisi yoksa Bigpara'dan çekilir
   - Bugünün verisi cache'e yazıldıktan sonra ertesi 10:30'a kadar bir daha gidilmez
 """
 from __future__ import annotations
 
 import logging
-import re
 import time
 import requests
 from datetime import date, datetime
@@ -25,14 +24,6 @@ _logger = logging.getLogger("uvicorn.error")
 _TZ = ZoneInfo("Europe/Istanbul")
 _TEFAS_SAAT = 630  # 10 * 60 + 30 — TEFAS'ın güncelleme saati
 
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json, text/javascript, */*",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-    "Origin": "https://www.tefas.gov.tr",
-    "Referer": "https://www.tefas.gov.tr/FonAnaliz.aspx",
-    "X-Requested-With": "XMLHttpRequest",
-}
 
 POPULER_FONLAR: dict[str, str] = {
     "YAS": "Yapı Kredi Portföy Altın Fonu",
@@ -94,61 +85,99 @@ def _bugunun_verisi_var_mi(kod: str) -> bool:
 # ── TEFAS veri çekme ──────────────────────────────────────────────────────────
 
 
-_TEFAS_FON_URL = "https://www.tefas.gov.tr/FonAnaliz.aspx"
+# Bigpara fon API (V1 — hisse listesiyle aynı yetkilendirme paterni)
+_BP_FON_LIST  = "https://bigpara.hurriyet.com.tr/api/v1/fon/list"
+_BP_FON_DETAY = "https://bigpara.hurriyet.com.tr/api/v1/fon/detay/{kod}"
+
+_BP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Referer": "https://bigpara.hurriyet.com.tr/fonlar/",
+    "X-Requested-With": "XMLHttpRequest",
+}
+
+# Bigpara toplu fon cache'i (5 dk)
+_bp_fon_ts: float = 0.0
+_bp_fon_data: dict[str, dict] = {}
+_BP_FON_TTL = 300
 
 
-def _tefas_session() -> requests.Session:
-    """Basit session — TEFAS sayfası için User-Agent yeterli."""
-    s = requests.Session()
-    s.headers.update(_HEADERS)
-    return s
-
-
-def _fetch_tefas(kod: str, session: requests.Session | None = None) -> dict:
+def _bigpara_fon_tumu(force: bool = False) -> dict[str, dict]:
     """
-    TEFAS FonAnaliz sayfasını HTML olarak çek, regex ile fiyat ve getiriyi ayıkla.
-    TEFAS birim pay değerleri standart olarak 6 ondalık basamak kullanır (örn: 13,784033).
-    Bu pattern sayfada yalnızca fon fiyatına ait olduğundan güvenle seçilebilir.
+    Bigpara'dan tüm yatırım fonu listesini çek.
+    Döndürülen dict: {FON_KODU: {kod, ad, fiyat, degisim_yuzde, ...}}
     """
-    s = session or _tefas_session()
-    resp = s.get(
-        _TEFAS_FON_URL,
-        params={"FonKod": kod.upper()},
-        timeout=15,
-    )
+    global _bp_fon_ts, _bp_fon_data
+    now = time.time()
+    if not force and _bp_fon_data and (now - _bp_fon_ts) < _BP_FON_TTL:
+        return _bp_fon_data
+
+    resp = requests.get(_BP_FON_LIST, headers=_BP_HEADERS, timeout=15)
     resp.raise_for_status()
-    html = resp.text
+    items = resp.json().get("data", [])
+    if not items:
+        raise ValueError("Bigpara fon listesi boş")
 
-    # Birim pay değeri: tam olarak 6 ondalık basamak (örn: 13,784033 veya 0,012345)
-    fiyat_match = re.search(r"\b(\d{1,6}[,\.]\d{6})\b", html)
-    if not fiyat_match:
-        raise ValueError(f"TEFAS fiyat bulunamadı: {kod} (sayfa yüklendi ama değer yok)")
-
-    fiyat = round(float(fiyat_match.group(1).replace(",", ".")), 6)
-    if fiyat == 0:
-        raise ValueError(f"TEFAS sıfır fiyat: {kod}")
-
-    # Günlük getiri: %XX,XX veya -XX,XX formatı (2-4 ondalık)
-    # "Son Fiyat" bloğu yakınındaki ilk getiri değerini al
-    gunluk = 0.0
-    getiri_match = re.search(
-        r"([+-]?\d{1,3}[,\.]\d{2,4})\s*(?:&#37;|%|<span[^>]*>%)",
-        html,
-    )
-    if getiri_match:
+    result: dict[str, dict] = {}
+    for item in items:
+        kod = str(item.get("kod") or item.get("fonkodu") or "").strip().upper()
+        if not kod:
+            continue
+        fiyat_raw = str(item.get("birimPayDegeri") or item.get("fiyat") or "0").replace(",", ".")
         try:
-            gunluk = round(float(getiri_match.group(1).replace(",", ".")), 4)
+            fiyat = round(float(fiyat_raw), 6)
+        except Exception:
+            fiyat = 0.0
+        if fiyat == 0:
+            continue
+        getiri_raw = str(item.get("gunlukGetiri") or item.get("getiri") or "0").replace(",", ".")
+        try:
+            gunluk = round(float(getiri_raw), 4)
         except Exception:
             gunluk = 0.0
 
+        result[kod] = {
+            "kod": kod,
+            "ad": POPULER_FONLAR.get(kod, str(item.get("fonUnvani") or item.get("ad") or kod)),
+            "fiyat": fiyat,
+            "degisim_yuzde": gunluk,
+            "para_birimi": "TRY",
+            "tarih": str(date.today()),
+            "kaynak": "bigpara",
+        }
+
+    if result:
+        _bp_fon_ts = now
+        _bp_fon_data = result
+        _logger.info(f"Bigpara fon listesi ✓ {len(result)} fon")
+    return result
+
+
+def _fetch_bigpara(kod: str) -> dict:
+    """Bigpara fon listesinden tek fon verisini çek."""
+    tum = _bigpara_fon_tumu()
+    if kod.upper() in tum:
+        return tum[kod.upper()]
+    # Listede yoksa detay endpoint'ini dene
+    url = _BP_FON_DETAY.format(kod=kod.upper())
+    resp = requests.get(url, headers=_BP_HEADERS, timeout=15)
+    resp.raise_for_status()
+    data = resp.json().get("data", {})
+    if not data:
+        raise ValueError(f"Bigpara'da fon bulunamadı: {kod}")
+    fiyat_raw = str(data.get("birimPayDegeri") or data.get("fiyat") or "0").replace(",", ".")
+    fiyat = round(float(fiyat_raw), 6)
+    if fiyat == 0:
+        raise ValueError(f"Bigpara sıfır fiyat: {kod}")
+    getiri_raw = str(data.get("gunlukGetiri") or "0").replace(",", ".")
     return {
         "kod": kod.upper(),
-        "ad": POPULER_FONLAR.get(kod.upper(), kod.upper()),
+        "ad": POPULER_FONLAR.get(kod.upper(), str(data.get("fonUnvani") or kod.upper())),
         "fiyat": fiyat,
-        "degisim_yuzde": gunluk,
+        "degisim_yuzde": round(float(getiri_raw), 4),
         "para_birimi": "TRY",
         "tarih": str(date.today()),
-        "kaynak": "tefas",
+        "kaynak": "bigpara",
     }
 
 
@@ -181,13 +210,13 @@ def _fetch(kod: str) -> dict | None:
     if not _tefas_hazir():
         return _stale.get(key)
 
-    # 4. 10:30 sonrası + cache miss → TEFAS'tan çek
+    # 4. 10:30 sonrası + cache miss → Bigpara'dan çek
     try:
-        result = _fetch_tefas(key)
+        result = _fetch_bigpara(key)
         _cache_set(key, result)
         return result
     except Exception as e:
-        _logger.warning(f"TEFAS hata ({key}): {e}")
+        _logger.warning(f"Bigpara fon hata ({key}): {e}")
         return _stale.get(key)
 
 
@@ -206,11 +235,11 @@ def warm_up() -> list[str]:
         _logger.info("Fon warm_up atlandı — saat 10:30 öncesi")
         return list(_stale.keys())
 
-    # Tek session → bir kez cookie al, tüm fonlara kullan (8 fon = 1+8 istek, 16 değil)
+    # Bigpara'dan tüm fon listesini tek seferde çek, popüler fonları cache'e yaz
     try:
-        session = _tefas_session()
+        tum = _bigpara_fon_tumu(force=True)
     except Exception as e:
-        _logger.warning(f"Fon warm_up: TEFAS session açılamadı: {e}")
+        _logger.warning(f"Fon warm_up: Bigpara fon listesi alınamadı: {e}")
         return list(_stale.keys())
 
     basarili: list[str] = []
@@ -218,13 +247,12 @@ def warm_up() -> list[str]:
         if _bugunun_verisi_var_mi(kod):
             basarili.append(kod)
             continue
-        try:
-            result = _fetch_tefas(kod, session=session)
-            _cache_set(kod, result)
+        if kod in tum:
+            _cache_set(kod, tum[kod])
             basarili.append(kod)
             _logger.debug(f"Fon warm_up ✓ {kod}")
-        except Exception as e:
-            _logger.warning(f"Fon warm_up ✗ {kod}: {e}")
+        else:
+            _logger.warning(f"Fon warm_up ✗ {kod}: Bigpara listesinde yok")
     return basarili
 
 
