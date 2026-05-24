@@ -18,7 +18,7 @@ import requests
 import httpx
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter(prefix="/fon", tags=["fon"])
 
@@ -297,3 +297,30 @@ def toplu_fiyat(
             veriler.append({"kod": k, "fiyat": None, "durum": "bulunamadı"})
 
     return {"sayı": len(liste), "veriler": veriler}
+
+
+@router.post("/seed", summary="GitHub Actions fon verisi yükle")
+def seed_fon(payload: dict, request: Request):
+    """
+    GitHub Actions daily job'ı tarafından çağrılır (her iş günü 10:35 İstanbul).
+    TEFAS'tan çekilen fon verilerini Redis + bellek cache'e yazar.
+    X-API-Key header gereklidir.
+    """
+    veriler = payload.get("veriler", [])
+    if not veriler:
+        raise HTTPException(400, "veriler listesi boş")
+
+    basarili = []
+    now = time.time()
+    for item in veriler:
+        kod = str(item.get("kod", "")).strip().upper()
+        if not kod or not item.get("fiyat"):
+            continue
+        _cache[kod] = (now, item)
+        _stale[kod] = item
+        from redis_cache import rset
+        rset(f"finans:fon:{kod}", item)
+        basarili.append(kod)
+
+    _logger.info(f"Fon seed ✓ {basarili}")
+    return {"basarili": basarili, "sayı": len(basarili)}
