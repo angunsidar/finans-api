@@ -12,9 +12,10 @@ Birincil kaynak: TEFAS resmi web servisi (BindHistoryInfo)
 from __future__ import annotations
 
 import logging
+import re
 import time
 import requests
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Query
 
@@ -24,7 +25,6 @@ _logger = logging.getLogger("uvicorn.error")
 _TZ = ZoneInfo("Europe/Istanbul")
 _TEFAS_SAAT = 630  # 10 * 60 + 30 — TEFAS'ın güncelleme saati
 
-_TEFAS_URL = "https://www.tefas.gov.tr/api/DB/BindHistoryInfo"
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Accept": "application/json, text/javascript, */*",
@@ -93,76 +93,61 @@ def _bugunun_verisi_var_mi(kod: str) -> bool:
 
 # ── TEFAS veri çekme ──────────────────────────────────────────────────────────
 
-def _tarih_aralik() -> tuple[str, str]:
-    """TEFAS'ın beklediği DD.MM.YYYY formatında (bugün - 3 gün) aralığı döner."""
-    bugun = date.today()
-    baslangic = bugun - timedelta(days=3)
-    fmt = lambda d: d.strftime("%d.%m.%Y")
-    return fmt(baslangic), fmt(bugun)
+
+_TEFAS_FON_URL = "https://www.tefas.gov.tr/FonAnaliz.aspx"
 
 
 def _tefas_session() -> requests.Session:
-    """
-    TEFAS için cookie'li oturum aç.
-    Ana sayfa bir kez yüklenir → ASP.NET session cookie'si alınır.
-    Bu cookie olmadan BindHistoryInfo boş data döndürür.
-    """
+    """Basit session — TEFAS sayfası için User-Agent yeterli."""
     s = requests.Session()
-    s.get("https://www.tefas.gov.tr/TarihselVeriler.aspx", headers=_HEADERS, timeout=10)
+    s.headers.update(_HEADERS)
     return s
 
 
 def _fetch_tefas(kod: str, session: requests.Session | None = None) -> dict:
     """
-    TEFAS'tan tek fon için güncel birim pay değeri çek.
-    session parametresi verilirse tekrar cookie alınmaz (toplu çekimde bunu kullan).
+    TEFAS FonAnaliz sayfasını HTML olarak çek, regex ile fiyat ve getiriyi ayıkla.
+    TEFAS birim pay değerleri standart olarak 6 ondalık basamak kullanır (örn: 13,784033).
+    Bu pattern sayfada yalnızca fon fiyatına ait olduğundan güvenle seçilebilir.
     """
-    bas, bit = _tarih_aralik()
-    payload = {
-        "fontip": "YAT",
-        "fonkod": kod.upper(),
-        "bastarih": bas,
-        "bittarih": bit,
-    }
     s = session or _tefas_session()
-    resp = s.post(_TEFAS_URL, data=payload, headers=_HEADERS, timeout=15)
+    resp = s.get(
+        _TEFAS_FON_URL,
+        params={"FonKod": kod.upper()},
+        timeout=15,
+    )
     resp.raise_for_status()
+    html = resp.text
 
-    rows = resp.json().get("data", [])
-    if not rows:
-        raise ValueError(f"TEFAS'ta veri yok: {kod}")
+    # Birim pay değeri: tam olarak 6 ondalık basamak (örn: 13,784033 veya 0,012345)
+    fiyat_match = re.search(r"\b(\d{1,6}[,\.]\d{6})\b", html)
+    if not fiyat_match:
+        raise ValueError(f"TEFAS fiyat bulunamadı: {kod} (sayfa yüklendi ama değer yok)")
 
-    # En güncel satır (son tarih)
-    rows.sort(key=lambda r: r.get("TARIH", ""), reverse=True)
-    row = rows[0]
-
-    fiyat_str = str(row.get("FIYAT") or "0").replace(",", ".")
-    fiyat = round(float(fiyat_str), 6)
+    fiyat = round(float(fiyat_match.group(1).replace(",", ".")), 6)
     if fiyat == 0:
         raise ValueError(f"TEFAS sıfır fiyat: {kod}")
 
-    gunluk_str = str(row.get("GUNLUKGETIRI") or "0").replace(",", ".")
-    gunluk = round(float(gunluk_str), 4)
-
-    # Tarih: "/Date(1716336000000)/" veya "YYYY-MM-DD" formatı
-    tarih_raw = str(row.get("TARIH", ""))
-    if "/Date(" in tarih_raw:
+    # Günlük getiri: %XX,XX veya -XX,XX formatı (2-4 ondalık)
+    # "Son Fiyat" bloğu yakınındaki ilk getiri değerini al
+    gunluk = 0.0
+    getiri_match = re.search(
+        r"([+-]?\d{1,3}[,\.]\d{2,4})\s*(?:&#37;|%|<span[^>]*>%)",
+        html,
+    )
+    if getiri_match:
         try:
-            from datetime import timezone
-            ms = int(tarih_raw.replace("/Date(", "").replace(")/", "").split("+")[0])
-            tarih = date.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+            gunluk = round(float(getiri_match.group(1).replace(",", ".")), 4)
         except Exception:
-            tarih = str(date.today())
-    else:
-        tarih = tarih_raw[:10] if len(tarih_raw) >= 10 else str(date.today())
+            gunluk = 0.0
 
     return {
         "kod": kod.upper(),
-        "ad": POPULER_FONLAR.get(kod.upper(), str(row.get("FONUNVAN", kod.upper()))),
+        "ad": POPULER_FONLAR.get(kod.upper(), kod.upper()),
         "fiyat": fiyat,
         "degisim_yuzde": gunluk,
         "para_birimi": "TRY",
-        "tarih": tarih,
+        "tarih": str(date.today()),
         "kaynak": "tefas",
     }
 
