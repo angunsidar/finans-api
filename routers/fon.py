@@ -12,8 +12,10 @@ Veri kaynağı: Bigpara fon listesi API (aynı Bigpara BIST için kullandığım
 from __future__ import annotations
 
 import logging
+import re
 import time
 import requests
+import httpx
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 from fastapi import APIRouter, HTTPException, Query
@@ -85,99 +87,69 @@ def _bugunun_verisi_var_mi(kod: str) -> bool:
 # ── TEFAS veri çekme ──────────────────────────────────────────────────────────
 
 
-# Bigpara fon API (V1 — hisse listesiyle aynı yetkilendirme paterni)
-_BP_FON_LIST  = "https://bigpara.hurriyet.com.tr/api/v1/fon/list"
-_BP_FON_DETAY = "https://bigpara.hurriyet.com.tr/api/v1/fon/detay/{kod}"
+_TEFAS_HTML_URL = "https://www.tefas.gov.tr/FonAnaliz.aspx"
 
-_BP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://bigpara.hurriyet.com.tr/fonlar/",
-    "X-Requested-With": "XMLHttpRequest",
+# Gerçek Chrome browser header'ları — bot tespitini aşmak için
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
 }
 
-# Bigpara toplu fon cache'i (5 dk)
-_bp_fon_ts: float = 0.0
-_bp_fon_data: dict[str, dict] = {}
-_BP_FON_TTL = 300
 
-
-def _bigpara_fon_tumu(force: bool = False) -> dict[str, dict]:
+def _fetch_tefas_html(kod: str) -> dict:
     """
-    Bigpara'dan tüm yatırım fonu listesini çek.
-    Döndürülen dict: {FON_KODU: {kod, ad, fiyat, degisim_yuzde, ...}}
+    TEFAS FonAnaliz.aspx sayfasını httpx (HTTP/2) + tam browser header'larıyla çek.
+    Fon birim pay değeri 6 ondalık basamaklıdır (örn: 13,784033) — regex ile bulunur.
     """
-    global _bp_fon_ts, _bp_fon_data
-    now = time.time()
-    if not force and _bp_fon_data and (now - _bp_fon_ts) < _BP_FON_TTL:
-        return _bp_fon_data
+    with httpx.Client(http2=True, headers=_BROWSER_HEADERS, timeout=20, follow_redirects=True) as client:
+        resp = client.get(_TEFAS_HTML_URL, params={"FonKod": kod.upper()})
+        resp.raise_for_status()
+        html = resp.text
 
-    resp = requests.get(_BP_FON_LIST, headers=_BP_HEADERS, timeout=15)
-    resp.raise_for_status()
-    items = resp.json().get("data", [])
-    if not items:
-        raise ValueError("Bigpara fon listesi boş")
+    # Debug: sunucunun ne döndürdüğünü logla
+    _logger.info(f"TEFAS HTML [{kod}] ilk 300 karakter: {html[:300]!r}")
 
-    result: dict[str, dict] = {}
-    for item in items:
-        kod = str(item.get("kod") or item.get("fonkodu") or "").strip().upper()
-        if not kod:
-            continue
-        fiyat_raw = str(item.get("birimPayDegeri") or item.get("fiyat") or "0").replace(",", ".")
-        try:
-            fiyat = round(float(fiyat_raw), 6)
-        except Exception:
-            fiyat = 0.0
-        if fiyat == 0:
-            continue
-        getiri_raw = str(item.get("gunlukGetiri") or item.get("getiri") or "0").replace(",", ".")
-        try:
-            gunluk = round(float(getiri_raw), 4)
-        except Exception:
-            gunluk = 0.0
+    # Birim pay değeri: 6 ondalık basamak (örn: 13,784033)
+    fiyat_match = re.search(r"\b(\d{1,6}[,\.]\d{6})\b", html)
+    if not fiyat_match:
+        raise ValueError(f"TEFAS fiyat bulunamadı: {kod} — HTML:{html[:200]!r}")
 
-        result[kod] = {
-            "kod": kod,
-            "ad": POPULER_FONLAR.get(kod, str(item.get("fonUnvani") or item.get("ad") or kod)),
-            "fiyat": fiyat,
-            "degisim_yuzde": gunluk,
-            "para_birimi": "TRY",
-            "tarih": str(date.today()),
-            "kaynak": "bigpara",
-        }
-
-    if result:
-        _bp_fon_ts = now
-        _bp_fon_data = result
-        _logger.info(f"Bigpara fon listesi ✓ {len(result)} fon")
-    return result
-
-
-def _fetch_bigpara(kod: str) -> dict:
-    """Bigpara fon listesinden tek fon verisini çek."""
-    tum = _bigpara_fon_tumu()
-    if kod.upper() in tum:
-        return tum[kod.upper()]
-    # Listede yoksa detay endpoint'ini dene
-    url = _BP_FON_DETAY.format(kod=kod.upper())
-    resp = requests.get(url, headers=_BP_HEADERS, timeout=15)
-    resp.raise_for_status()
-    data = resp.json().get("data", {})
-    if not data:
-        raise ValueError(f"Bigpara'da fon bulunamadı: {kod}")
-    fiyat_raw = str(data.get("birimPayDegeri") or data.get("fiyat") or "0").replace(",", ".")
-    fiyat = round(float(fiyat_raw), 6)
+    fiyat = round(float(fiyat_match.group(1).replace(",", ".")), 6)
     if fiyat == 0:
-        raise ValueError(f"Bigpara sıfır fiyat: {kod}")
-    getiri_raw = str(data.get("gunlukGetiri") or "0").replace(",", ".")
+        raise ValueError(f"TEFAS sıfır fiyat: {kod}")
+
+    # Günlük getiri
+    gunluk = 0.0
+    getiri_match = re.search(r"([+-]?\d{1,3}[,\.]\d{4})\s*(?:%|&#37;)", html)
+    if getiri_match:
+        try:
+            gunluk = round(float(getiri_match.group(1).replace(",", ".")), 4)
+        except Exception:
+            pass
+
     return {
         "kod": kod.upper(),
-        "ad": POPULER_FONLAR.get(kod.upper(), str(data.get("fonUnvani") or kod.upper())),
+        "ad": POPULER_FONLAR.get(kod.upper(), kod.upper()),
         "fiyat": fiyat,
-        "degisim_yuzde": round(float(getiri_raw), 4),
+        "degisim_yuzde": gunluk,
         "para_birimi": "TRY",
         "tarih": str(date.today()),
-        "kaynak": "bigpara",
+        "kaynak": "tefas",
     }
 
 
@@ -210,13 +182,13 @@ def _fetch(kod: str) -> dict | None:
     if not _tefas_hazir():
         return _stale.get(key)
 
-    # 4. 10:30 sonrası + cache miss → Bigpara'dan çek
+    # 4. 10:30 sonrası + cache miss → TEFAS HTML'den çek
     try:
-        result = _fetch_bigpara(key)
+        result = _fetch_tefas_html(key)
         _cache_set(key, result)
         return result
     except Exception as e:
-        _logger.warning(f"Bigpara fon hata ({key}): {e}")
+        _logger.warning(f"TEFAS HTML hata ({key}): {e}")
         return _stale.get(key)
 
 
@@ -235,24 +207,18 @@ def warm_up() -> list[str]:
         _logger.info("Fon warm_up atlandı — saat 10:30 öncesi")
         return list(_stale.keys())
 
-    # Bigpara'dan tüm fon listesini tek seferde çek, popüler fonları cache'e yaz
-    try:
-        tum = _bigpara_fon_tumu(force=True)
-    except Exception as e:
-        _logger.warning(f"Fon warm_up: Bigpara fon listesi alınamadı: {e}")
-        return list(_stale.keys())
-
     basarili: list[str] = []
     for kod in POPULER_FONLAR:
         if _bugunun_verisi_var_mi(kod):
             basarili.append(kod)
             continue
-        if kod in tum:
-            _cache_set(kod, tum[kod])
+        try:
+            result = _fetch_tefas_html(kod)
+            _cache_set(kod, result)
             basarili.append(kod)
             _logger.debug(f"Fon warm_up ✓ {kod}")
-        else:
-            _logger.warning(f"Fon warm_up ✗ {kod}: Bigpara listesinde yok")
+        except Exception as e:
+            _logger.warning(f"Fon warm_up ✗ {kod}: {e}")
     return basarili
 
 
