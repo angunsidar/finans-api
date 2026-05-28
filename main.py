@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon
+from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, portfoy
 
 _logger = logging.getLogger("uvicorn.error")
 
@@ -294,6 +294,7 @@ app.include_router(abd.router)
 app.include_router(evren.router)
 app.include_router(gumus.router)
 app.include_router(fon.router)
+app.include_router(portfoy.router)
 
 
 # ─── Genel Endpoints ──────────────────────────────────────────────────────────
