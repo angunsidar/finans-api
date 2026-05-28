@@ -92,6 +92,26 @@ def _to_slug(text: str) -> str:
     return text
 
 
+# ── ISIN prefix → varlık türü ────────────────────────────────────────────────
+# Türkiye ISIN formatı: TR + 10 alfanümerik
+# TRE = hisse senedi (Equity), TRB/TR0 = devlet tahvili, TRY = yatırım fonu
+# XS = Eurobond, US = ABD menkul kıymeti, vs.
+def _isin_tur(isin: str) -> str | None:
+    if isin.startswith("TRE"):
+        return "hisse"
+    if isin.startswith("TRY"):
+        return "yatirim_fonu"
+    if isin.startswith("TR0") or isin.startswith("TRB"):
+        return "devlet_tahvili"
+    if isin.startswith("TRC"):
+        return "varlik_kiralama"
+    if isin.startswith("TRS"):
+        return "ozel_tahvil"
+    if isin[:2] in ("XS", "US", "DE", "FR", "GB"):
+        return "eurobond"
+    return None  # Bilinmiyor — mevcut current_kat korunur
+
+
 # ── RSC HTML parser ──────────────────────────────────────────────────────────
 def _parse_rsc(html: str) -> str:
     """self.__next_f.push içeriklerini unicode-escape decode ederek birleştirir."""
@@ -383,23 +403,32 @@ def _parse_holdings(text: str, result: dict):
 
         # Satırdaki tüm sayıları al
         nums = _NUMBER_RE.findall(line)
-        if len(nums) < 3:
+        if len(nums) < 4:
             continue
 
+        # Sütun düzeni (PDF): ... TOPLAM DEĞER | FPD% | GRUP FTD% | FTD%
+        # Tarih (29/04/26) ve ödeme sayısı (80100511) regex'te parçalanır,
+        # bu yüzden son 4'e bakıyoruz: toplam_deger, fpd%, grp_ftd%, ftd%
         try:
-            toplam_deger = _tr_float(nums[-3])
+            toplam_deger = _tr_float(nums[-4])
+            fpd_pct      = _tr_float(nums[-3])
             ftd_grp_pct  = _tr_float(nums[-2])
             ftd_pct      = _tr_float(nums[-1])
         except Exception:
             continue
+
+        # ISIN prefix'e göre varlık türünü tespit et (section header'dan daha güvenilir)
+        isin_tur = _isin_tur(isin)
+        if isin_tur:
+            current_kat = isin_tur
 
         # Kod (ISIN öncesindeki ilk kelime)
         before_isin = line[:isin_m.start()].strip()
         tokens = before_isin.split()
         if tokens:
             kod = tokens[0].upper()
-            # Kod çok uzunsa (ISIN tekrarı) veya küçükse isin kullan
-            if len(kod) > 12 or not kod.isalpha():
+            # Kod çok uzunsa (ISIN tekrarı) veya geçersizse isin kullan
+            if len(kod) > 12 or not kod.replace("-", "").isalnum():
                 kod = isin
         else:
             kod = isin
@@ -409,7 +438,7 @@ def _parse_holdings(text: str, result: dict):
             "isin": isin,
             "tur": current_kat,
             "toplam_deger": toplam_deger,
-            "fpd_yuzde": None,  # satırdan güvenilir çekilemiyor
+            "fpd_yuzde": fpd_pct,
             "ftd_yuzde": ftd_pct,
         })
 
