@@ -1,20 +1,19 @@
 """
 Türk yatırım fonu endpoint'leri.
-Veri kaynağı: Bigpara fon listesi API (aynı Bigpara BIST için kullandığımız pattern)
+Veri kaynağı: TEFAS JSON API (fonFiyatBilgiGetir)
   - Birim pay değeri (NAV), günlük getiri, fon adı
-  - Bigpara fon verisi her iş günü ~10:30 İstanbul saatinde güncellenir
+  - Statik Bearer token ile kimlik doğrulama — cookie/session gerektirmez
+  - TEFAS her iş günü ~10:30 İstanbul saatinde güncellenir
 
 Çekme zamanı:
-  - Saat 10:30 öncesi → Bigpara'ya gidilmez, stale/Redis veri döndürülür
-  - Saat 10:30 sonrası → bugünün verisi yoksa Bigpara'dan çekilir
+  - Saat 10:30 öncesi → TEFAS'a gidilmez, stale/Redis veri döndürülür
+  - Saat 10:30 sonrası → bugünün verisi yoksa TEFAS API'den çekilir
   - Bugünün verisi cache'e yazıldıktan sonra ertesi 10:30'a kadar bir daha gidilmez
 """
 from __future__ import annotations
 
 import logging
-import re
 import time
-import requests
 import httpx
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -84,72 +83,70 @@ def _bugunun_verisi_var_mi(kod: str) -> bool:
     return yazilma.date() == bugun and yazilma.hour * 60 + yazilma.minute >= _TEFAS_SAAT
 
 
-# ── TEFAS veri çekme ──────────────────────────────────────────────────────────
+# ── TEFAS JSON API ────────────────────────────────────────────────────────────
+# Statik Bearer token — TEFAS JavaScript bundle'ına gömülü, tüm fonlarda aynı
 
+_TEFAS_API_URL = "https://www.tefas.gov.tr/api/funds/fonFiyatBilgiGetir"
+_TEFAS_BEARER  = "ST-tefaswebwse3irfmSBj4iRAzGPbAlS94Se"
 
-_TEFAS_HTML_URL = "https://www.tefas.gov.tr/FonAnaliz.aspx"
-
-# Gerçek Chrome browser header'ları — bot tespitini aşmak için
-_BROWSER_HEADERS = {
+_TEFAS_HEADERS = {
+    "Authorization": f"Bearer {_TEFAS_BEARER}",
+    "Content-Type": "application/json",
+    "Accept": "*/*",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Origin": "https://www.tefas.gov.tr",
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
 }
 
 
-def _fetch_tefas_html(kod: str) -> dict:
+def _fetch_tefas_api(kod: str) -> dict:
     """
-    TEFAS FonAnaliz.aspx sayfasını httpx (HTTP/2) + tam browser header'larıyla çek.
-    Fon birim pay değeri 6 ondalık basamaklıdır (örn: 13,784033) — regex ile bulunur.
+    TEFAS JSON API'sinden birim pay değeri çek.
+    POST /api/funds/fonFiyatBilgiGetir — statik Bearer token ile kimlik doğrulama.
+    periyod=1 → son 1 aylık veri; son kayıt = güncel fiyat.
     """
-    with httpx.Client(http2=True, headers=_BROWSER_HEADERS, timeout=20, follow_redirects=True) as client:
-        resp = client.get(_TEFAS_HTML_URL, params={"FonKod": kod.upper()})
+    key = kod.upper()
+    headers = {
+        **_TEFAS_HEADERS,
+        "Referer": f"https://www.tefas.gov.tr/tr/fon-detayli-analiz/{key}",
+    }
+    payload = {"fonKodu": key, "dil": "TR", "periyod": 1}
+
+    with httpx.Client(timeout=20, follow_redirects=True) as client:
+        resp = client.post(_TEFAS_API_URL, json=payload, headers=headers)
         resp.raise_for_status()
-        html = resp.text
 
-    # Debug: sunucunun ne döndürdüğünü logla
-    _logger.info(f"TEFAS HTML [{kod}] ilk 300 karakter: {html[:300]!r}")
+    data = resp.json()
+    result_list = data.get("resultList") or []
 
-    # Birim pay değeri: 6 ondalık basamak (örn: 13,784033)
-    fiyat_match = re.search(r"\b(\d{1,6}[,\.]\d{6})\b", html)
-    if not fiyat_match:
-        raise ValueError(f"TEFAS fiyat bulunamadı: {kod} — HTML:{html[:200]!r}")
+    if not result_list:
+        raise ValueError(f"TEFAS API boş sonuç: {key}")
 
-    fiyat = round(float(fiyat_match.group(1).replace(",", ".")), 6)
+    latest = result_list[-1]
+    fiyat = float(latest["fiyat"])
     if fiyat == 0:
-        raise ValueError(f"TEFAS sıfır fiyat: {kod}")
+        raise ValueError(f"TEFAS API sıfır fiyat: {key}")
 
-    # Günlük getiri
-    gunluk = 0.0
-    getiri_match = re.search(r"([+-]?\d{1,3}[,\.]\d{4})\s*(?:%|&#37;)", html)
-    if getiri_match:
-        try:
-            gunluk = round(float(getiri_match.group(1).replace(",", ".")), 4)
-        except Exception:
-            pass
+    # Günlük değişim — son iki kayıt üzerinden hesapla
+    degisim = 0.0
+    if len(result_list) >= 2:
+        prev = float(result_list[-2]["fiyat"])
+        if prev > 0:
+            degisim = round((fiyat - prev) / prev * 100, 4)
+
+    ad = latest.get("fonUnvan") or POPULER_FONLAR.get(key, key)
 
     return {
-        "kod": kod.upper(),
-        "ad": POPULER_FONLAR.get(kod.upper(), kod.upper()),
-        "fiyat": fiyat,
-        "degisim_yuzde": gunluk,
+        "kod": key,
+        "ad": ad,
+        "fiyat": round(fiyat, 6),
+        "degisim_yuzde": degisim,
         "para_birimi": "TRY",
-        "tarih": str(date.today()),
-        "kaynak": "tefas",
+        "tarih": latest.get("tarih", str(date.today())),
+        "kaynak": "tefas_api",
     }
 
 
@@ -182,13 +179,13 @@ def _fetch(kod: str) -> dict | None:
     if not _tefas_hazir():
         return _stale.get(key)
 
-    # 4. 10:30 sonrası + cache miss → TEFAS HTML'den çek
+    # 4. 10:30 sonrası + cache miss → TEFAS JSON API'den çek
     try:
-        result = _fetch_tefas_html(key)
+        result = _fetch_tefas_api(key)
         _cache_set(key, result)
         return result
     except Exception as e:
-        _logger.warning(f"TEFAS HTML hata ({key}): {e}")
+        _logger.warning(f"TEFAS API hata ({key}): {e}")
         return _stale.get(key)
 
 
@@ -213,7 +210,7 @@ def warm_up() -> list[str]:
             basarili.append(kod)
             continue
         try:
-            result = _fetch_tefas_html(kod)
+            result = _fetch_tefas_api(kod)
             _cache_set(kod, result)
             basarili.append(kod)
             _logger.debug(f"Fon warm_up ✓ {kod}")
