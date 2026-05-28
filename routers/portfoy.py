@@ -15,7 +15,9 @@ Endpoint'ler:
 from __future__ import annotations
 
 import io
+import json
 import logging
+import os
 import re
 import time
 
@@ -90,6 +92,24 @@ def _to_slug(text: str) -> str:
     text = text.lower().translate(_TR_CHARS)
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     return text
+
+
+# ── BIST universe isim lookup ────────────────────────────────────────────────
+_BIST_NAMES: dict[str, str] = {}  # sembol → tam_ad (lazy-loaded)
+
+def _bist_name(sembol: str) -> str | None:
+    """BIST sembolünden şirket adını döndür. data/bist_universe.json'dan okur."""
+    global _BIST_NAMES
+    if not _BIST_NAMES:
+        try:
+            path = os.path.join(os.path.dirname(__file__), "..", "data", "bist_universe.json")
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            hisseler = raw.get("hisseler", [])
+            _BIST_NAMES = {h["sembol"].upper(): h.get("tam_ad") or h.get("ad", "") for h in hisseler}
+        except Exception as e:
+            _logger.warning(f"bist_universe.json okunamadı: {e}")
+    return _BIST_NAMES.get(sembol.upper())
 
 
 # ── ISIN prefix → varlık türü ────────────────────────────────────────────────
@@ -436,6 +456,7 @@ def _parse_holdings(text: str, result: dict):
         holdings.append({
             "kod": kod,
             "isin": isin,
+            "unvan": _bist_name(kod),  # None ise yatırım fonu / bilinmiyor
             "tur": current_kat,
             "toplam_deger": toplam_deger,
             "fpd_yuzde": fpd_pct,
