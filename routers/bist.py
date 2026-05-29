@@ -74,6 +74,8 @@ _cache: dict[str, tuple[float, dict]] = {}
 _stale: dict[str, dict] = {}
 _TTL = 300  # 5 dakika
 
+_TEMETTÜ_REDIS_TTL = 35 * 86400  # 35 gün
+
 # Bigpara toplu veri cache'i
 _bigpara_ts: float = 0.0
 _bigpara_data: dict[str, dict] = {}
@@ -512,6 +514,96 @@ def toplu_fiyat(
         "sayı": len(liste),
         "veriler": [bulunanlar.get(s, {"sembol": s, "hata": "bulunamadı"}) for s in liste],
     }
+
+
+def _fetch_temettü_single(sembol: str) -> dict | None:
+    """Tek hisse için temettü verisi çek (yfinance). None → veri yok."""
+    try:
+        tick = yf.Ticker(_ticker(sembol))
+        info = tick.info
+        if not info or info.get("quoteType") is None:
+            return None
+
+        def _safe_float(val) -> float | None:
+            try:
+                return round(float(val), 6) if val is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        ex_date_raw = info.get("exDividendDate")
+        ex_date_str: str | None = None
+        if ex_date_raw:
+            try:
+                from datetime import timezone as _tz
+                ex_date_str = datetime.fromtimestamp(ex_date_raw, tz=_tz.utc).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+        from datetime import timezone as _tz
+        return {
+            "sembol": sembol,
+            "temettü_verimi": _safe_float(info.get("dividendYield")),
+            "yıllık_temettü": _safe_float(info.get("dividendRate")),
+            "ex_temettü_tarihi": ex_date_str,
+            "ödeme_oranı": _safe_float(info.get("payoutRatio")),
+            "para_birimi": "TRY",
+            "son_güncelleme": datetime.now(tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    except Exception:
+        return None
+
+
+def _bist_universe_sembolleri() -> list[str]:
+    from pathlib import Path
+    import json
+    f = Path(__file__).resolve().parent.parent / "data" / "bist_universe.json"
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return [h["sembol"] for h in d.get("hisseler", []) if h.get("sembol")]
+    except Exception:
+        return list(POPULER_HISSELER.keys())
+
+
+def temettü_guncelle() -> list[str]:
+    """Tüm BIST evren hisseleri için temettü verisini paralel çek, Redis'e 35 gün TTL ile yaz."""
+    import concurrent.futures as _cf
+    semboller = _bist_universe_sembolleri()
+    redis_data: dict = {}
+
+    with _cf.ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_fetch_temettü_single, s): s for s in semboller}
+        for fut in _cf.as_completed(futures, timeout=60):
+            s = futures[fut]
+            try:
+                result = fut.result()
+                if result:
+                    redis_data[f"finans:temettü:bist:{s}"] = result
+            except Exception:
+                pass
+
+    if redis_data:
+        from redis_cache import rset_many
+        rset_many(redis_data, ttl=_TEMETTÜ_REDIS_TTL)
+
+    return list(redis_data.keys())
+
+
+@router.get("/hisse/{sembol}/temettü", summary="BIST hisse temettü bilgisi")
+def bist_temettü(sembol: str):
+    key = sembol.upper()
+
+    from redis_cache import rget, rset_many
+    cached = rget(f"finans:temettü:bist:{key}")
+    if cached:
+        return cached
+
+    # Redis'te yok → tek seferlik çek (monthly job henüz çalışmadı)
+    result = _fetch_temettü_single(key)
+    if result is None:
+        raise HTTPException(404, f"Hisse bulunamadı veya temettü verisi yok: {key}")
+
+    rset_many({f"finans:temettü:bist:{key}": result}, ttl=_TEMETTÜ_REDIS_TTL)
+    return result
 
 
 @router.get("/piyasa", summary="Piyasa durum bilgisi")

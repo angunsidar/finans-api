@@ -21,6 +21,11 @@ from fastapi.responses import RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, portfoy
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    _APScheduler = AsyncIOScheduler
+except ImportError:
+    _APScheduler = None
 
 _logger = logging.getLogger("uvicorn.error")
 
@@ -102,6 +107,24 @@ async def _warm_caches():
             sembol = rk.replace("finans:abd:", "")
             abd._stale[sembol] = val
             abd._cache[sembol] = (now, val)
+            loaded += 1
+
+    # Fon fiyat cache (finans:fon:*)
+    redis_fon = rget_prefix("finans:fon:")
+    for rk, val in redis_fon.items():
+        if val:
+            kod = rk.replace("finans:fon:", "")
+            fon._cache[kod] = (now, val)
+            fon._stale[kod] = val
+            loaded += 1
+
+    # Portföy holdings cache (finans:portfoy:*)
+    redis_portfoy = rget_prefix("finans:portfoy:")
+    for rk, val in redis_portfoy.items():
+        if val:
+            kod = rk.replace("finans:portfoy:", "")
+            portfoy._cache[kod] = (now, val)
+            portfoy._stale[kod] = val
             loaded += 1
 
     _logger.info(f"Redis pre-load: {loaded} key yüklendi → _cache + _stale dolu, ilk istek <10ms")
@@ -194,11 +217,86 @@ async def _background_worker():
         await asyncio.sleep(300)  # 5 dakika bekle, tekrar çek
 
 
+def _tefas_daily_job():
+    """
+    Her iş günü 10:30'da çalışır.
+    SLUG_MAP'teki tüm fonların TEFAS fiyatını çekip Redis'e yazar.
+    """
+    from routers.portfoy import _SLUG_MAP
+    all_codes = list(fon.POPULER_FONLAR.keys()) + [k for k in _SLUG_MAP if k not in fon.POPULER_FONLAR]
+    basarili = []
+    for kod in all_codes:
+        try:
+            result = fon._fetch_tefas_api(kod)
+            fon._cache_set(kod, result)
+            basarili.append(kod)
+        except Exception as e:
+            _logger.warning(f"TEFAS daily job hata ({kod}): {e}")
+    _logger.info(f"TEFAS daily job ✓ {len(basarili)}/{len(all_codes)} fon güncellendi")
+
+
+def _portfoy_watchdog_job():
+    """
+    Her iş günü 11:00'de çalışır.
+    SLUG_MAP'teki fonların disclosureIndex'ini kontrol eder.
+    Değişiklik varsa PDF'i çekip cache'e yazar.
+    """
+    try:
+        results = portfoy.watchdog_all()
+        updated = [k for k, v in results.items() if v]
+        _logger.info(f"Portföy watchdog job tamamlandı. Güncellenen: {updated or 'yok'}")
+    except Exception as e:
+        _logger.error(f"Portföy watchdog job genel hata: {e}")
+
+
+def _temettü_monthly_job():
+    """
+    Her ayın 1'i 06:00'da çalışır.
+    Popüler BIST + ABD hisselerinin temettü verisini paralel çekip Redis'e 35 gün TTL ile yazar.
+    """
+    try:
+        bist_keys = bist.temettü_guncelle()
+        _logger.info(f"Temettü monthly job ✓ BIST: {len(bist_keys)} hisse")
+    except Exception as e:
+        _logger.error(f"Temettü monthly job ✗ BIST: {e}")
+    try:
+        abd_keys = abd.temettü_guncelle()
+        _logger.info(f"Temettü monthly job ✓ ABD: {len(abd_keys)} hisse")
+    except Exception as e:
+        _logger.error(f"Temettü monthly job ✗ ABD: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     asyncio.create_task(_warm_caches())
     asyncio.create_task(_background_worker())
-    yield
+
+    # APScheduler — günlük zamanlanmış görevler
+    if _APScheduler:
+        from zoneinfo import ZoneInfo
+        _scheduler = _APScheduler(timezone=ZoneInfo("Europe/Istanbul"))
+        _scheduler.add_job(
+            _tefas_daily_job, "cron",
+            hour=10, minute=30, day_of_week="mon-fri",
+            id="tefas_daily", replace_existing=True,
+        )
+        _scheduler.add_job(
+            _portfoy_watchdog_job, "cron",
+            hour=11, minute=0, day_of_week="mon-fri",
+            id="portfoy_watchdog", replace_existing=True,
+        )
+        _scheduler.add_job(
+            _temettü_monthly_job, "cron",
+            day=1, hour=6, minute=0,
+            id="temettü_monthly", replace_existing=True,
+        )
+        _scheduler.start()
+        _logger.info("APScheduler başladı: TEFAS 10:30, Portföy watchdog 11:00 (hafta içi), Temettü her ayın 1'i 06:00")
+        yield
+        _scheduler.shutdown(wait=False)
+    else:
+        _logger.warning("APScheduler yüklü değil — zamanlanmış görevler devre dışı")
+        yield
 
 # ─── Ortam değişkenleri ────────────────────────────────────────────────────────
 _raw_keys = os.getenv("API_KEYS", "")

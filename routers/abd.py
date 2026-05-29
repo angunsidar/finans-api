@@ -59,6 +59,8 @@ _cache: dict[str, tuple[float, dict]] = {}
 _stale: dict[str, dict] = {}
 _TTL = 300  # 5 dakika
 
+_TEMETTÜ_REDIS_TTL = 35 * 86400  # 35 gün
+
 
 def _cache_get(key: str) -> dict | None:
     if key in _cache:
@@ -311,3 +313,100 @@ def abd_etf(sembol: str):
     ad = POPULER_ETFLER.get(sembol.upper(), sembol.upper())
     veri = _fetch(sembol.upper())
     return {**veri, "ad": ad, "tur": "ETF"}
+
+
+def _fetch_temettü_single(sembol: str) -> dict | None:
+    """Tek hisse için temettü verisi çek (yfinance). None → veri yok."""
+    try:
+        tick = yf.Ticker(sembol.upper())
+        info = tick.info
+        if not info or info.get("quoteType") is None:
+            return None
+
+        def _safe_float(val) -> float | None:
+            try:
+                return round(float(val), 6) if val is not None else None
+            except (TypeError, ValueError):
+                return None
+
+        ex_date_raw = info.get("exDividendDate")
+        ex_date_str: str | None = None
+        if ex_date_raw:
+            try:
+                from datetime import timezone as _tz
+                ex_date_str = __import__("datetime").datetime.fromtimestamp(
+                    ex_date_raw, tz=_tz.utc
+                ).strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+        import datetime as _dt
+        return {
+            "sembol": sembol.upper(),
+            "temettü_verimi": _safe_float(info.get("dividendYield")),
+            "yıllık_temettü": _safe_float(info.get("dividendRate")),
+            "ex_temettü_tarihi": ex_date_str,
+            "ödeme_oranı": _safe_float(info.get("payoutRatio")),
+            "para_birimi": "USD",
+            "son_güncelleme": _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    except Exception:
+        return None
+
+
+def _abd_universe_sembolleri() -> list[str]:
+    from pathlib import Path
+    import json
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    semboller: set[str] = set()
+    for dosya in ("sp500_universe.json", "nasdaq100_universe.json"):
+        try:
+            d = json.loads((data_dir / dosya).read_text(encoding="utf-8"))
+            for h in d.get("hisseler", []):
+                if h.get("sembol"):
+                    semboller.add(h["sembol"])
+        except Exception:
+            pass
+    return list(semboller) if semboller else list(POPULER_HISSELER.keys())
+
+
+def temettü_guncelle() -> list[str]:
+    """S&P 500 + Nasdaq 100 hisseleri için temettü verisini paralel çek, Redis'e 35 gün TTL ile yaz."""
+    import concurrent.futures as _cf
+    semboller = _abd_universe_sembolleri()
+    redis_data: dict = {}
+
+    with _cf.ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(_fetch_temettü_single, s): s for s in semboller}
+        for fut in _cf.as_completed(futures, timeout=60):
+            s = futures[fut]
+            try:
+                result = fut.result()
+                if result:
+                    redis_data[f"finans:temettü:abd:{s}"] = result
+            except Exception:
+                pass
+
+    if redis_data:
+        from redis_cache import rset_many
+        rset_many(redis_data, ttl=_TEMETTÜ_REDIS_TTL)
+
+    return list(redis_data.keys())
+
+
+@router.get("/hisse/{sembol}/temettü", summary="ABD hisse temettü bilgisi")
+def abd_temettü(sembol: str):
+    key = sembol.upper()
+
+    from redis_cache import rget, rset_many
+    cached = rget(f"finans:temettü:abd:{key}")
+    if cached:
+        return cached
+
+    # Redis'te yok → tek seferlik çek (monthly job henüz çalışmadı)
+    result = _fetch_temettü_single(key)
+    if result is None:
+        raise HTTPException(404, f"Hisse bulunamadı veya temettü verisi yok: {key}")
+
+    rset_many({f"finans:temettü:abd:{key}": result}, ttl=_TEMETTÜ_REDIS_TTL)
+    return result
