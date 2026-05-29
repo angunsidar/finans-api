@@ -676,6 +676,27 @@ def portfoy_getir(kod: str):
     return _fetch_portfoy(kod.upper())
 
 
+@router.post("/warm", summary="Tüm SLUG_MAP fonları için portföy verisi çek ve Redis'e yaz")
+def portfoy_warm(request: Request):
+    """
+    Bir kerelik / manuel tetikleme için.
+    SLUG_MAP'teki tüm fonların portföy dağılımını KAP'tan çeker, Redis'e yazar.
+    X-API-Key gereklidir.
+    """
+    import time as _time
+    sonuclar = {}
+    for kod in list(_SLUG_MAP.keys()):
+        try:
+            _fetch_portfoy(kod)
+            sonuclar[kod] = "ok"
+        except Exception as e:
+            sonuclar[kod] = f"hata: {str(e)[:80]}"
+        _time.sleep(0.8)  # KAP rate-limit koruması
+    ok_count  = sum(1 for v in sonuclar.values() if v == "ok")
+    err_count = len(sonuclar) - ok_count
+    return {"toplam": len(sonuclar), "ok": ok_count, "hata": err_count, "detay": sonuclar}
+
+
 @router.post("/seed", summary="Dışarıdan portföy verisi yükle")
 def seed_portfoy(payload: dict, request: Request):
     """
