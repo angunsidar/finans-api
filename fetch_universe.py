@@ -191,17 +191,17 @@ def fetch_nasdaq100_list() -> list[dict]:
 # yfinance metadata çekici
 # ─────────────────────────────────────────────────────────────────────────────
 def logo_url(info: dict) -> str | None:
-    """Logo URL'sini bul: yfinance logo_url → Clearbit fallback."""
+    """Logo URL'sini bul: yfinance logo_url → Google Favicon fallback."""
     # 1. yfinance direkt
     lu = info.get("logo_url")
     if lu:
         return lu
-    # 2. Website'den Clearbit URL oluştur
+    # 2. Website'den Google Favicon URL oluştur
     website = info.get("website", "")
     if website:
         domain = re.sub(r"^https?://(www\.)?", "", website).rstrip("/").split("/")[0]
         if domain:
-            return f"https://logo.clearbit.com/{domain}"
+            return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
     return None
 
 
