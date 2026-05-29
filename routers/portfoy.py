@@ -50,15 +50,19 @@ _HEADERS = {
 # ── Fon kodu → KAP slug eşlemesi (popüler fonlar) ──────────────────────────
 # Slug = "{kod}-{tefas-unvan-slug}"  (küçük harf, Türkçe karakter → latin)
 _SLUG_MAP: dict[str, str] = {
+    # Guncel sluglar (TEFAS 2026-05)
+    "YKT": "ykt-yapi-kredi-portfoy-altin-fonu",
+    "GTA": "gta-garanti-portfoy-altin-fonu",
+    "TTA": "tta-is-portfoy-altin-fonu",
+    "AFO": "afo-ak-portfoy-altin-fonu",
+    "TCA": "tca-ziraat-portfoy-altin-katilim-fonu",
+    "HBF": "hbf-hsbc-portfoy-altin-fonu",
+    "GOL": "gol-garanti-portfoy-altin-katilim-fonu",
+    "DBA": "dba-deniz-portfoy-altin-fonu",
     "TLY": "tly-tera-portfoy-birinci-serbest-fon",
-    "YAS": "yas-yapi-kredi-portfoy-altin-fonu",
-    "GAF": "gaf-garanti-bbva-portfoy-altin-fonu",
-    "MAC": "mac-marmara-cap-turkiye-fonu",
-    "IPB": "ipb-is-portfoy-bist-banka-endeksi-fonu",
-    "TTE": "tte-teb-portfoy-tahvil-fonu",
-    "AFT": "aft-ak-portfoy-kisa-vad-tahvil-fonu",
-    "AKF": "akf-ak-portfoy-birinci-fon",
-    "TKF": "tkf-turkiye-kurumsal-yonetim-end-fonu",
+    "MAC": "mac-marmara-capital-portfoy-hisse-senedi-tl-fonu",
+    # Eski / gecersiz sluglar buradan kaldirildi (YAS, GAF, TKF, AKF, IPB, TTE, AFT)
+    # Kodu bilinmeyen fonlar icin fon_universe.json'dan otomatik slug uretilir
 }
 
 # ── Cache (TTL 25 gün — ay içinde değişmez) ──────────────────────────────────
