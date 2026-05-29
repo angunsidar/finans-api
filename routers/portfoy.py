@@ -167,7 +167,9 @@ def watchdog_all() -> dict[str, bool]:
 _TR_CHARS = str.maketrans("ıİğĞüÜşŞöÖçÇ", "iigguussoocc")
 
 def _to_slug(text: str) -> str:
-    text = text.lower().translate(_TR_CHARS)
+    # translate ONCE lower'dan once: Python'da "I".lower() -> "i̇" (birlesik nokta)
+    # bu da regex'e takilip yanlis tire olusturuyor. Once buyuk -> latin, sonra lower.
+    text = text.translate(_TR_CHARS).lower()
     text = re.sub(r"[^a-z0-9]+", "-", text).strip("-")
     return text
 
@@ -578,16 +580,16 @@ def _fetch_portfoy(kod: str, unvan: str | None = None) -> dict:
     """
     Tek fon için portföy dağılım verisini çek.
     Cache miss durumunda KAP'tan sırayla çeker.
+    SLUG_MAP'te olmayan fonlar için TEFAS API'den doğru UTF-8 unvan alınır.
     """
     kod = kod.upper()
-    if not unvan:
+
+    # SLUG_MAP'te yoksa TEFAS'tan unvan çek (fon_universe encoding bozuk olabilir)
+    if kod not in _SLUG_MAP and not unvan:
         try:
-            import json
-            from pathlib import Path
-            data = json.loads((Path(__file__).parent.parent / "data" / "fon_universe.json").read_text(encoding="utf-8-sig"))
-            match = next((f for f in data.get("fonlar", []) if f.get("kod") == kod), None)
-            if match:
-                unvan = match.get("unvan")
+            from routers.fon import _fetch_tefas_api
+            tefas = _fetch_tefas_api(kod)
+            unvan = tefas.get("ad") or tefas.get("fonUnvan")
         except Exception:
             pass
 
