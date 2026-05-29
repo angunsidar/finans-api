@@ -27,14 +27,24 @@ _TEFAS_SAAT = 630  # 10 * 60 + 30 — TEFAS'ın güncelleme saati
 
 
 POPULER_FONLAR: dict[str, str] = {
-    "YAS": "Yapı Kredi Portföy Altın Fonu",
-    "GAF": "Garanti BBVA Portföy Altın Fonu",
-    "TKF": "Türkiye Kurumsal Yönetim End. Fonu",
-    "AKF": "Ak Portföy Birinci Fon",
-    "MAC": "Marmara Cap. Türkiye Fonu",
-    "IPB": "İş Portföy BIST Banka End. Fonu",
-    "TTE": "TEB Portföy Tahvil Fonu",
-    "AFT": "Ak Portföy Kısa Vad. Tahvil Fonu",
+    # Altın fonları
+    "YKT": "Yapı Kredi Portföy Altın Fonu",
+    "GTA": "Garanti Portföy Altın Fonu",
+    "TTA": "İş Portföy Altın Fonu",
+    "AFO": "Ak Portföy Altın Fonu",
+    "TCA": "Ziraat Portföy Altın Katılım Fonu",
+    "HBF": "HSBC Portföy Altın Fonu",
+    "GOL": "Garanti Portföy Altın Katılım Fonu",
+    "DBA": "Deniz Portföy Altın Fonu",
+    # Hisse senedi fonları
+    "MAC": "Marmara Capital Portföy Hisse Senedi Fonu",
+    "TLY": "Tera Portföy Birinci Serbest Fon",
+    "IPB": "İstanbul Portföy Birinci Değişken Fon",
+    # BYF (Borsa Yatırım Fonları)
+    "FGA": "QNB Portföy Altın Katılım BYF",
+    "LTK": "Ak Portföy Altın Katılım BYF",
+    "ILK": "İş Portföy Altın Katılım BYF",
+    "ZGD": "Ziraat Portföy Altın Katılım BYF",
 }
 
 # ── Cache + stale fallback ────────────────────────────────────────────────────
@@ -228,7 +238,7 @@ def liste():
     }
 
 
-@router.get("/fon/{kod}", summary="Tek fon birim pay değeri")
+@router.get("/{kod}", summary="Tek fon birim pay değeri")
 def fon_fiyat(kod: str):
     result = _fetch(kod)
     if result is None:
