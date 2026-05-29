@@ -60,7 +60,7 @@ _SLUG_MAP: dict[str, str] = {
     "GOL": "gol-garanti-portfoy-altin-katilim-fonu",
     "DBA": "dba-deniz-portfoy-altin-fonu",
     "TLY": "tly-tera-portfoy-birinci-serbest-fon",
-    "MAC": "mac-marmara-capital-portfoy-hisse-senedi-tl-fonu",
+    "MAC": "mac-marmara-capital-portfoy-hisse-senedi-tl-fonu-hisse-senedi-yogun-fon",
     # Eski / gecersiz sluglar buradan kaldirildi (YAS, GAF, TKF, AKF, IPB, TTE, AFT)
     # Kodu bilinmeyen fonlar icin fon_universe.json'dan otomatik slug uretilir
 }
