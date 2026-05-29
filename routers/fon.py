@@ -238,13 +238,17 @@ def fon_fiyat(kod: str):
 
 @router.get("/toplu", summary="Çoklu fon birim pay değeri")
 def toplu_fiyat(
-    fonlar: str = Query(..., description="Virgülle ayrılmış fon kodları. Örn: YAS,GAF,TKF")
+    fonlar: str = Query(None, description="Virgülle ayrılmış fon kodları. Örn: YAS,GAF,TKF"),
+    kodlar: str = Query(None, description="fonlar ile aynı — eski isim desteği"),
 ):
     """
     Birden fazla fonu tek sorguda getir.
     Önce memory cache, sonra Redis, gerekirse TEFAS (10:30 sonrası).
     """
-    liste = [k.strip().upper() for k in fonlar.split(",") if k.strip()]
+    raw = fonlar or kodlar
+    if not raw:
+        raise HTTPException(400, "En az bir fon kodu giriniz.")
+    liste = [k.strip().upper() for k in raw.split(",") if k.strip()]
     if not liste:
         raise HTTPException(400, "En az bir fon kodu giriniz.")
     if len(liste) > 30:

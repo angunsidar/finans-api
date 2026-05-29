@@ -576,6 +576,16 @@ def _fetch_portfoy(kod: str, unvan: str | None = None) -> dict:
     Cache miss durumunda KAP'tan sırayla çeker.
     """
     kod = kod.upper()
+    if not unvan:
+        try:
+            import json
+            from pathlib import Path
+            data = json.loads((Path(__file__).parent.parent / "data" / "fon_universe.json").read_text(encoding="utf-8"))
+            match = next((f for f in data.get("fonlar", []) if f.get("kod") == kod), None)
+            if match:
+                unvan = match.get("unvan")
+        except Exception:
+            pass
 
     # Memory cache
     cached = _cache_get(kod)
