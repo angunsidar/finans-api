@@ -232,6 +232,44 @@ def evren_istatistik():
     return {"toplam_asset": toplam, "kaynaklar": ozet}
 
 
+# ─── FON EVRENİ ──────────────────────────────────────────────────────────────
+
+@router.get("/fon", summary="Tüm yatırım fonları listesi (2575 fon)")
+def evren_fon(
+    q: str = Query("", description="Fon kodu veya unvan ile arama"),
+    kategori: str = Query("", description="Kategori filtresi (örn: Altın Fonu)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """TEFAS'taki tüm yatırım fonlarını sayfalı olarak döndürür."""
+    data = _load("fon_universe.json")
+    fonlar: list = data.get("fonlar", [])
+
+    q_low = q.lower()
+    sonuc = [
+        f for f in fonlar
+        if (not q or q_low in f.get("kod", "").lower()
+                  or q_low in f.get("unvan", "").lower())
+        and (not kategori or kategori.lower() in f.get("kategori", "").lower())
+    ]
+
+    return {
+        "toplam": len(sonuc),
+        "toplam_evren": data.get("toplam", len(fonlar)),
+        "offset": offset,
+        "limit": limit,
+        "fonlar": sonuc[offset: offset + limit],
+    }
+
+
+@router.get("/fon/kategoriler", summary="Fon kategori listesi")
+def fon_kategoriler():
+    """Tüm fon kategorilerini döndürür (filtre için)."""
+    data = _load("fon_universe.json")
+    kategoriler = sorted({f.get("kategori", "") for f in data.get("fonlar", []) if f.get("kategori")})
+    return {"kategoriler": kategoriler}
+
+
 # ─── Güncelle ────────────────────────────────────────────────────────────────
 
 @router.post("/guncelle", summary="Evren verisini yenile (arka planda)")

@@ -80,9 +80,83 @@ def _cache_set(kod: str, val: dict):
     _stale[kod] = val
     try:
         from redis_cache import rset
-        rset(f"finans:portfoy:{kod}", val, ex=_TTL)
+        rset(f"finans:portfoy:{kod}", val)
     except Exception:
         pass
+
+
+# Watchdog — her fon için son bilinen disclosureIndex
+_stored_indexes: dict[str, int] = {}  # Redis'e de yazar, bu dict sadece memory hız için
+
+
+def _get_stored_index(kod: str) -> int | None:
+    if kod in _stored_indexes:
+        return _stored_indexes[kod]
+    try:
+        from redis_cache import rget
+        v = rget(f"finans:portfoy_idx:{kod}")
+        if v and isinstance(v, dict):
+            idx = v.get("disclosure_index")
+            if idx:
+                _stored_indexes[kod] = int(idx)
+                return _stored_indexes[kod]
+    except Exception:
+        pass
+    return None
+
+
+def _set_stored_index(kod: str, idx: int):
+    _stored_indexes[kod] = idx
+    try:
+        from redis_cache import rset
+        rset(f"finans:portfoy_idx:{kod}", {"disclosure_index": idx})
+    except Exception:
+        pass
+
+
+def watchdog_check(kod: str) -> bool:
+    """
+    disclosureIndex değişti mi kontrol et.
+    Değiştiyse PDF pipeline'ı çalıştır, cache'i güncelle.
+    Returns True = yeni veri çekildi.
+    """
+    kod = kod.upper()
+    slug = _SLUG_MAP.get(kod)
+    if not slug:
+        return False
+
+    try:
+        with httpx.Client(headers=_HEADERS, timeout=20, follow_redirects=True) as client:
+            mkk_oid = _fetch_mkk_oid(slug, client)
+            disc_idx, _ = _fetch_disclosure_index(mkk_oid, client)
+
+        stored = _get_stored_index(kod)
+        if stored is not None and disc_idx == stored:
+            return False  # Değişmedi
+
+        # Yeni rapor var — tam pipeline çalıştır
+        _logger.info(f"Portföy watchdog: {kod} yeni index {disc_idx} (önceki: {stored})")
+        data = _fetch_portfoy(kod)  # PDF indir + parse + cache yaz
+        _set_stored_index(kod, disc_idx)
+        return True
+
+    except Exception as e:
+        _logger.warning(f"Portföy watchdog hata ({kod}): {e}")
+        return False
+
+
+def watchdog_all() -> dict[str, bool]:
+    """Tüm izlenen fonları kontrol et. main.py scheduler tarafından çağrılır."""
+    results = {}
+    for kod in _SLUG_MAP:
+        results[kod] = watchdog_check(kod)
+        time.sleep(0.5)  # KAP rate-limit koruması
+    updated = [k for k, v in results.items() if v]
+    if updated:
+        _logger.info(f"Portföy watchdog: {updated} güncellendi")
+    else:
+        _logger.info("Portföy watchdog: değişiklik yok")
+    return results
 
 
 # ── Türkçe → slug yardımcısı ─────────────────────────────────────────────────
@@ -98,18 +172,34 @@ def _to_slug(text: str) -> str:
 _BIST_NAMES: dict[str, str] = {}  # sembol → tam_ad (lazy-loaded)
 
 def _bist_name(sembol: str) -> str | None:
-    """BIST sembolünden şirket adını döndür. data/bist_universe.json'dan okur."""
+    """
+    Önce fon_universe.json'dan bak (yatırım fonları dahil),
+    bulamazsa bist_universe.json'a bak (BIST hisseleri).
+    """
     global _BIST_NAMES
     if not _BIST_NAMES:
+        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+        # fon_universe — kod → unvan
         try:
-            path = os.path.join(os.path.dirname(__file__), "..", "data", "bist_universe.json")
-            with open(path, encoding="utf-8") as f:
+            with open(os.path.join(data_dir, "fon_universe.json"), encoding="utf-8") as f:
                 raw = json.load(f)
-            hisseler = raw.get("hisseler", [])
-            _BIST_NAMES = {h["sembol"].upper(): h.get("tam_ad") or h.get("ad", "") for h in hisseler}
+            for f_item in raw.get("fonlar", []):
+                k = f_item.get("kod", "").upper()
+                if k:
+                    _BIST_NAMES[k] = f_item.get("unvan", "")
+        except Exception as e:
+            _logger.warning(f"fon_universe.json okunamadı: {e}")
+        # bist_universe — sembol → tam_ad (üstüne yaz — hisse adları daha kısa/doğru)
+        try:
+            with open(os.path.join(data_dir, "bist_universe.json"), encoding="utf-8") as f:
+                raw = json.load(f)
+            for h in raw.get("hisseler", []):
+                k = h.get("sembol", "").upper()
+                if k:
+                    _BIST_NAMES[k] = h.get("tam_ad") or h.get("ad", "")
         except Exception as e:
             _logger.warning(f"bist_universe.json okunamadı: {e}")
-    return _BIST_NAMES.get(sembol.upper())
+    return _BIST_NAMES.get(sembol.upper()) or None
 
 
 # ── ISIN prefix → varlık türü ────────────────────────────────────────────────
