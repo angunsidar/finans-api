@@ -187,7 +187,7 @@ def _bist_name(sembol: str) -> str | None:
         data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
         # fon_universe — kod → unvan
         try:
-            with open(os.path.join(data_dir, "fon_universe.json"), encoding="utf-8") as f:
+            with open(os.path.join(data_dir, "fon_universe.json"), encoding="utf-8-sig") as f:
                 raw = json.load(f)
             for f_item in raw.get("fonlar", []):
                 k = f_item.get("kod", "").upper()
@@ -197,7 +197,7 @@ def _bist_name(sembol: str) -> str | None:
             _logger.warning(f"fon_universe.json okunamadı: {e}")
         # bist_universe — sembol → tam_ad (üstüne yaz — hisse adları daha kısa/doğru)
         try:
-            with open(os.path.join(data_dir, "bist_universe.json"), encoding="utf-8") as f:
+            with open(os.path.join(data_dir, "bist_universe.json"), encoding="utf-8-sig") as f:
                 raw = json.load(f)
             for h in raw.get("hisseler", []):
                 k = h.get("sembol", "").upper()
