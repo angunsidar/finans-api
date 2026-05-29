@@ -580,7 +580,7 @@ def _fetch_portfoy(kod: str, unvan: str | None = None) -> dict:
         try:
             import json
             from pathlib import Path
-            data = json.loads((Path(__file__).parent.parent / "data" / "fon_universe.json").read_text(encoding="utf-8"))
+            data = json.loads((Path(__file__).parent.parent / "data" / "fon_universe.json").read_text(encoding="utf-8-sig"))
             match = next((f for f in data.get("fonlar", []) if f.get("kod") == kod), None)
             if match:
                 unvan = match.get("unvan")
