@@ -711,7 +711,13 @@ def _warm_all_worker():
 
     try:
         data = _json.loads((Path(__file__).parent.parent / "data" / "fon_universe.json").read_text(encoding="utf-8-sig"))
-        fonlar = [f["kod"] for f in data.get("fonlar", []) if f.get("kod")]
+        # Emeklilik fonlari (EF) ve BYF (ETF) atla — portfoy dagilim raporu yayinlamiyorlar
+        # Unvan encoding bozuk olabilir, ASCII parcasiyla kontrol et
+        def _is_emeklilik(fon):
+            unvan = fon.get("unvan", "").upper()
+            # "EMEKL" = EMEKLİLİK'in encoding-proof parcasi
+            return "EMEKL" in unvan and "YATIRIM FONU" in unvan
+        fonlar = [f["kod"] for f in data.get("fonlar", []) if f.get("kod") and not _is_emeklilik(f)]
     except Exception as e:
         _warm_all_status["durum"] = f"hata: {e}"
         return
