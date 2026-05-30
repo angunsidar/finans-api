@@ -737,9 +737,19 @@ def _warm_all_worker():
     logger = logging.getLogger("uvicorn.error")
 
     for i, kod in enumerate(fonlar):
-        if _cache_get(kod):  # zaten cacheliyse atla
+        # Once memory cache, sonra Redis kontrol et — restart sonrasi Redis'te olanlar atlanir
+        if _cache_get(kod):
+            _warm_all_status["ok"] += 1
             _warm_all_status["islenen"] += 1
             continue
+        try:
+            from redis_cache import rget
+            if rget(f"finans:portfoy:{kod}"):
+                _warm_all_status["ok"] += 1
+                _warm_all_status["islenen"] += 1
+                continue  # Redis'te var, KAP'a gitme, uyuma
+        except Exception:
+            pass
         try:
             _fetch_portfoy(kod)
             _warm_all_status["ok"] += 1
@@ -747,10 +757,10 @@ def _warm_all_worker():
                 logger.info(f"portfoy warm_all: {_warm_all_status['ok']} ok / {i+1} islendi")
         except Exception as e:
             _warm_all_status["hata"] += 1
-            if _warm_all_status["hata"] <= 10:  # sadece ilk 10 hatayı logla
+            if _warm_all_status["hata"] <= 10:
                 logger.warning(f"portfoy warm_all {kod}: {str(e)[:60]}")
         _warm_all_status["islenen"] += 1
-        _time.sleep(1.2)  # KAP rate-limit: maks ~50 istek/dk
+        _time.sleep(1.2)  # KAP rate-limit — sadece gercek istek yapilan fonlar icin
 
     _warm_all_status["durum"] = "tamamlandi"
     logger.info(f"portfoy warm_all tamamlandi: {_warm_all_status['ok']} ok, {_warm_all_status['hata']} hata")
