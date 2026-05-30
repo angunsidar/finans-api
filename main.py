@@ -313,6 +313,7 @@ FREE_PATHS = {
     "/redoc",
     "/openapi.json",
     "/logo",
+    "/favicon.ico",
 }
 
 
@@ -426,6 +427,11 @@ def get_logo(domain: str = Query(..., description="Şirket domain'i. Örn: apple
         )
     except _requests.RequestException:
         raise HTTPException(status_code=502, detail="Logo servisi erişilemez")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    raise HTTPException(status_code=404, detail="No favicon")
 
 
 @app.api_route("/health", methods=["GET", "HEAD"], tags=["meta"], summary="Servis durumu")
