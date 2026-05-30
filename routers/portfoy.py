@@ -29,7 +29,7 @@ try:
 except ImportError:
     _PDF_OK = False
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 
 router = APIRouter(prefix="/portfoy", tags=["portfoy"])
 _logger = logging.getLogger("uvicorn.error")
@@ -708,82 +708,6 @@ def portfoy_warm(request: Request):
     return {"toplam": len(sonuclar), "ok": ok_count, "hata": err_count, "detay": sonuclar}
 
 
-# Tüm fon_universe warm-up için durum takibi
-_warm_all_status: dict = {"durum": "bekliyor", "toplam": 0, "ok": 0, "hata": 0, "islenen": 0}
-
-def _warm_all_worker():
-    """Arka planda tüm fon_universe fonlarını çeker. Thread olarak çalışır."""
-    import time as _time
-    import json as _json
-    from pathlib import Path
-
-    global _warm_all_status
-    _warm_all_status = {"durum": "calisiyor", "toplam": 0, "ok": 0, "hata": 0, "islenen": 0}
-
-    try:
-        data = _json.loads((Path(__file__).parent.parent / "data" / "fon_universe.json").read_text(encoding="utf-8-sig"))
-        # Emeklilik fonlari (EF) ve BYF (ETF) atla — portfoy dagilim raporu yayinlamiyorlar
-        # Unvan encoding bozuk olabilir, ASCII parcasiyla kontrol et
-        def _is_emeklilik(fon):
-            unvan = fon.get("unvan", "").upper()
-            # "EMEKL" = EMEKLİLİK'in encoding-proof parcasi
-            return "EMEKL" in unvan and "YATIRIM FONU" in unvan
-        fonlar = [f["kod"] for f in data.get("fonlar", []) if f.get("kod") and not _is_emeklilik(f)]
-    except Exception as e:
-        _warm_all_status["durum"] = f"hata: {e}"
-        return
-
-    _warm_all_status["toplam"] = len(fonlar)
-    logger = logging.getLogger("uvicorn.error")
-
-    for i, kod in enumerate(fonlar):
-        # Once memory cache, sonra Redis kontrol et — restart sonrasi Redis'te olanlar atlanir
-        if _cache_get(kod):
-            _warm_all_status["ok"] += 1
-            _warm_all_status["islenen"] += 1
-            continue
-        try:
-            from redis_cache import rget
-            if rget(f"finans:portfoy:{kod}"):
-                _warm_all_status["ok"] += 1
-                _warm_all_status["islenen"] += 1
-                continue  # Redis'te var, KAP'a gitme, uyuma
-        except Exception:
-            pass
-        try:
-            _fetch_portfoy(kod)
-            _warm_all_status["ok"] += 1
-            if _warm_all_status["ok"] % 50 == 0:
-                logger.info(f"portfoy warm_all: {_warm_all_status['ok']} ok / {i+1} islendi")
-        except Exception as e:
-            _warm_all_status["hata"] += 1
-            if _warm_all_status["hata"] <= 10:
-                logger.warning(f"portfoy warm_all {kod}: {str(e)[:60]}")
-        _warm_all_status["islenen"] += 1
-        _time.sleep(1.2)  # KAP rate-limit — sadece gercek istek yapilan fonlar icin
-
-    _warm_all_status["durum"] = "tamamlandi"
-    logger.info(f"portfoy warm_all tamamlandi: {_warm_all_status['ok']} ok, {_warm_all_status['hata']} hata")
-
-
-@router.post("/warm_all", summary="Tüm fon_universe fonları için arka planda portföy çek")
-def portfoy_warm_all(background_tasks: BackgroundTasks, request: Request):
-    """
-    fon_universe.json'daki tüm ~2500 fon için portföy çeker.
-    Arka planda çalışır (~85 dk). Durum için GET /portfoy/warm_all/durum kullan.
-    Zaten cachelenen fonlar atlanır.
-    """
-    import threading
-    if _warm_all_status.get("durum") == "calisiyor":
-        return {"mesaj": "Zaten çalışıyor", "durum": _warm_all_status}
-    t = threading.Thread(target=_warm_all_worker, daemon=True)
-    t.start()
-    return {"mesaj": "Başlatıldı", "toplam_fon": "~2575", "tahmini_sure": "~85 dk"}
-
-
-@router.get("/warm_all/durum", summary="warm_all ilerleme durumu")
-def portfoy_warm_all_durum():
-    return _warm_all_status
 
 
 @router.post("/seed", summary="Dışarıdan portföy verisi yükle")
