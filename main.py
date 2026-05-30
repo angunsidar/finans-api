@@ -15,9 +15,10 @@ import concurrent.futures
 import logging
 import time
 from contextlib import asynccontextmanager
+import requests as _requests
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, portfoy
@@ -311,6 +312,7 @@ FREE_PATHS = {
     "/docs",
     "/redoc",
     "/openapi.json",
+    "/logo",
 }
 
 
@@ -399,6 +401,31 @@ app.include_router(portfoy.router)
 @app.get("/", include_in_schema=False)
 def root():
     return RedirectResponse(url="/docs")
+
+
+@app.get("/logo", tags=["meta"], summary="Şirket logosu proxy — API key gerektirmez")
+def get_logo(domain: str = Query(..., description="Şirket domain'i. Örn: apple.com")):
+    """
+    Favicon/logo görselini gstatic'ten çekip CORS header'ıyla döndürür.
+    Flutter Web gibi CORS kısıtlamalı ortamlar için kullanılır.
+    API key gerektirmez.
+    """
+    url = (
+        f"https://t3.gstatic.com/faviconV2"
+        f"?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL"
+        f"&url=http://{domain}&size=128"
+    )
+    try:
+        resp = _requests.get(url, timeout=5)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=404, detail="Logo bulunamadı")
+        return Response(
+            content=resp.content,
+            media_type=resp.headers.get("Content-Type", "image/png"),
+            headers={"Cache-Control": "public, max-age=604800"},
+        )
+    except _requests.RequestException:
+        raise HTTPException(status_code=502, detail="Logo servisi erişilemez")
 
 
 @app.api_route("/health", methods=["GET", "HEAD"], tags=["meta"], summary="Servis durumu")

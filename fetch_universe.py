@@ -201,7 +201,11 @@ def logo_url(info: dict) -> str | None:
     if website:
         domain = re.sub(r"^https?://(www\.)?", "", website).rstrip("/").split("/")[0]
         if domain:
-            return f"https://www.google.com/s2/favicons?domain={domain}&sz=128"
+            return (
+                f"https://t3.gstatic.com/faviconV2"
+                f"?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL"
+                f"&url=http://{domain}&size=128"
+            )
     return None
 
 
