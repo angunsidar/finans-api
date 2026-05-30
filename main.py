@@ -9,11 +9,13 @@ Ortam değişkenleri:
 """
 from __future__ import annotations
 
+import json
 import os
 import asyncio
 import concurrent.futures
 import logging
 import time
+from pathlib import Path
 from contextlib import asynccontextmanager
 import requests as _requests
 from fastapi import FastAPI, Request, HTTPException, Query
@@ -404,13 +406,32 @@ def root():
     return RedirectResponse(url="/docs")
 
 
+def _load_logo_index() -> dict:
+    try:
+        p = Path(__file__).parent / "data" / "logo_index.json"
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+_LOGO_INDEX: dict = _load_logo_index()
+_GITHUB_LOGOS = "https://angunsidar.github.io/finans-logos"
+
+
 @app.get("/logo", tags=["meta"], summary="Şirket logosu proxy — API key gerektirmez")
 def get_logo(domain: str = Query(..., description="Şirket domain'i. Örn: apple.com")):
     """
-    Favicon/logo görselini gstatic'ten çekip CORS header'ıyla döndürür.
-    Flutter Web gibi CORS kısıtlamalı ortamlar için kullanılır.
+    Logo kaynağı önceliği: GitHub Pages (SVG/PNG) → gstatic fallback.
     API key gerektirmez.
     """
+    # 1. GitHub Pages'te var mı?
+    ext = _LOGO_INDEX.get(domain)
+    if ext:
+        return RedirectResponse(
+            url=f"{_GITHUB_LOGOS}/{domain}.{ext}",
+            headers={"Cache-Control": "public, max-age=604800"},
+        )
+
+    # 2. gstatic fallback
     url = (
         f"https://t3.gstatic.com/faviconV2"
         f"?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL"
