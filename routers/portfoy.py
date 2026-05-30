@@ -584,14 +584,25 @@ def _fetch_portfoy(kod: str, unvan: str | None = None) -> dict:
     """
     kod = kod.upper()
 
-    # SLUG_MAP'te yoksa TEFAS'tan unvan çek (fon_universe encoding bozuk olabilir)
+    # SLUG_MAP'te yoksa unvan bul: 1) fon_universe.json, 2) TEFAS fallback
     if kod not in _SLUG_MAP and not unvan:
         try:
-            from routers.fon import _fetch_tefas_api
-            tefas = _fetch_tefas_api(kod)
-            unvan = tefas.get("ad") or tefas.get("fonUnvan")
+            import json as _j
+            from pathlib import Path as _P
+            _raw = _j.loads((_P(__file__).parent.parent / "data" / "fon_universe.json").read_text(encoding="utf-8-sig"))
+            _match = next((f for f in _raw.get("fonlar", []) if f.get("kod") == kod), None)
+            if _match:
+                unvan = _match.get("unvan")
         except Exception:
             pass
+        # TEFAS fallback — sadece fon_universe'de yoksa
+        if not unvan:
+            try:
+                from routers.fon import _fetch_tefas_api
+                tefas = _fetch_tefas_api(kod)
+                unvan = tefas.get("ad") or tefas.get("fonUnvan")
+            except Exception:
+                pass
 
     # Memory cache
     cached = _cache_get(kod)
