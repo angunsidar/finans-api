@@ -24,7 +24,7 @@ def _load(dosya: str) -> dict:
         path = DATA_DIR / dosya
         if not path.exists():
             raise HTTPException(404, f"{dosya} bulunamadı. Önce /evren/guncelle çalıştırın.")
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8-sig") as f:
             _cache[dosya] = json.load(f)
     return _cache[dosya]
 
