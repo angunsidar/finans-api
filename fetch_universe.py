@@ -190,17 +190,27 @@ def fetch_nasdaq100_list() -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 # yfinance metadata çekici
 # ─────────────────────────────────────────────────────────────────────────────
+_GITHUB_LOGOS = "https://angunsidar.github.io/finans-logos"
+
+def _load_logo_index() -> dict:
+    try:
+        p = Path(__file__).parent / "data" / "logo_index.json"
+        return json.load(open(p, encoding="utf-8"))
+    except Exception:
+        return {}
+
+_LOGO_INDEX: dict = _load_logo_index()
+
 def logo_url(info: dict) -> str | None:
-    """Logo URL'sini bul: yfinance logo_url → Google Favicon fallback."""
-    # 1. yfinance direkt
-    lu = info.get("logo_url")
-    if lu:
-        return lu
-    # 2. Website'den Google Favicon URL oluştur
+    """Logo URL: GitHub Pages (SVG/PNG) → Google Favicon fallback."""
     website = info.get("website", "")
     if website:
         domain = re.sub(r"^https?://(www\.)?", "", website).rstrip("/").split("/")[0]
         if domain:
+            ext = _LOGO_INDEX.get(domain)
+            if ext:
+                return f"{_GITHUB_LOGOS}/{domain}.{ext}"
+            # Index'te yoksa gstatic fallback
             return (
                 f"https://t3.gstatic.com/faviconV2"
                 f"?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL"
