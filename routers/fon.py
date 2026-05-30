@@ -238,14 +238,6 @@ def liste():
     }
 
 
-@router.get("/{kod}", summary="Tek fon birim pay değeri")
-def fon_fiyat(kod: str):
-    result = _fetch(kod)
-    if result is None:
-        raise HTTPException(404, f"Fon verisi alınamadı: {kod.upper()}")
-    return result
-
-
 @router.get("/toplu", summary="Çoklu fon birim pay değeri")
 def toplu_fiyat(
     fonlar: str = Query(None, description="Virgülle ayrılmış fon kodları. Örn: YAS,GAF,TKF"),
@@ -308,6 +300,14 @@ def toplu_fiyat(
             veriler.append({"kod": k, "fiyat": None, "durum": "bulunamadı"})
 
     return {"sayı": len(liste), "veriler": veriler}
+
+
+@router.get("/{kod}", summary="Tek fon birim pay değeri")
+def fon_fiyat(kod: str):
+    result = _fetch(kod)
+    if result is None:
+        raise HTTPException(404, f"Fon verisi alınamadı: {kod.upper()}")
+    return result
 
 
 @router.post("/seed", summary="GitHub Actions fon verisi yükle")
