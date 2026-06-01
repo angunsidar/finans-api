@@ -288,13 +288,8 @@ async def lifespan(app: FastAPI):
             hour=11, minute=0, day_of_week="mon-fri",
             id="portfoy_watchdog", replace_existing=True,
         )
-        _scheduler.add_job(
-            _temettü_monthly_job, "cron",
-            day=1, hour=6, minute=0,
-            id="temettü_monthly", replace_existing=True,
-        )
         _scheduler.start()
-        _logger.info("APScheduler başladı: TEFAS 10:30, Portföy watchdog 11:00 (hafta içi), Temettü her ayın 1'i 06:00")
+        _logger.info("APScheduler başladı: TEFAS 10:30, Portföy watchdog 11:00 (hafta içi)")
         yield
         _scheduler.shutdown(wait=False)
     else:
