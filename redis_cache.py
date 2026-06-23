@@ -56,13 +56,13 @@ def _reset_client():
     _client = None
 
 
-def rset(key: str, value: dict | list):
-    """Redis'e yaz (TTL 24 saat). Hata olursa sessizce geç."""
+def rset(key: str, value: dict | list, ttl: int | None = None):
+    """Redis'e yaz. TTL verilmezse 24 saat. Hata olursa sessizce geç."""
     r = _get_client()
     if not r:
         return
     try:
-        r.set(key, json.dumps(value, ensure_ascii=False), ex=_TTL)
+        r.set(key, json.dumps(value, ensure_ascii=False), ex=(ttl or _TTL))
     except Exception as e:
         _logger.debug(f"Redis rset hata ({key}): {e}")
         _reset_client()

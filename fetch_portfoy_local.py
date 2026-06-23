@@ -90,23 +90,51 @@ def redis_yaz(kod, data):
 def parse_pdf(pdf_bytes, kod):
     import pdfplumber, io
     holdings = []
+    SKIP_SATIRLAR = {"varlik adi", "toplam", "genel toplam", "varliklar", "portfoy",
+                     "fon adi", "isin", "aciklama", "", "toplam net varlik degeri"}
+
+    def oran_bul(row):
+        """Satirdaki 0-100 araligindaki ilk sayiyi bul (yuzde sutunu nerede olursa olsun)."""
+        for hucre in reversed(row):  # Genellikle sonda, sonden basla
+            if hucre is None:
+                continue
+            temiz = str(hucre).replace(",", ".").replace("%", "").strip()
+            try:
+                val = float(temiz)
+                if 0 < val <= 100:
+                    return val
+            except:
+                continue
+        return None
+
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
             for table in (page.extract_tables() or []):
                 for row in table:
-                    if not row or len(row) < 3:
+                    if not row or len(row) < 2:
                         continue
                     isim = str(row[0] or "").strip()
-                    if not isim or isim.lower() in ("varlik adi", "toplam", "genel toplam", ""):
+                    if not isim or isim.lower().strip() in SKIP_SATIRLAR:
                         continue
-                    try:
-                        oran = float(str(row[-1] or "").replace(",", ".").replace("%", "").strip())
-                    except:
+                    # Rakamla baslayan satirlari atla (sayfa no, tarih vs)
+                    if isim and isim[0].isdigit():
                         continue
-                    if 0 < oran <= 100:
-                        holdings.append({"isim": isim, "oran": round(oran, 4)})
-    return {"kod": kod, "holdings": holdings, "kaynak": "kap_pdf",
-            "tarih": datetime.now().strftime("%Y-%m")}
+                    oran = oran_bul(row)
+                    if oran is not None:
+                        holdings.append({"kod": isim[:80], "ftd_yuzde": round(oran, 4), "tur": "diger"})
+
+    # Duplikatlari temizle (ayni kod birden fazla sayfada cikabilir)
+    seen = set()
+    unique = []
+    for h in holdings:
+        if h["kod"] not in seen:
+            seen.add(h["kod"])
+            unique.append(h)
+
+    return {"kod": kod, "holdings": unique, "kategori_ozeti": {},
+            "donem": datetime.now().strftime("%Y-%m"),
+            "kaynak": "kap_pdf_metin",
+            "guncelleme": datetime.now().strftime("%Y-%m-%dT%H:%M:%S")}
 
 def isle_fon(kod, unvan, sleep_sn=1.0):
     """Tek fon icin tam pipeline. Her worker bu fonksiyonu cagiriyor."""
@@ -122,7 +150,8 @@ def isle_fon(kod, unvan, sleep_sn=1.0):
             rsc = parse_rsc(r.text)
             m = re.search(r'"mkkMemberOid"\s*:\s*"([^"]+)"', rsc)
             if not m:
-                return f"skip:mkkMemberOid yok"
+                tprint(f"  SKIP {kod} | KAP sayfasi yok (mkkMemberOid bulunamadi)")
+                return "skip:mkkMemberOid yok"
 
             mkk_oid = m.group(1)
             time.sleep(0.3)
@@ -132,6 +161,7 @@ def isle_fon(kod, unvan, sleep_sn=1.0):
             rsc2 = parse_rsc(r2.text)
             m2 = re.search(r'"disclosureIndex"\s*:\s*(\d+)', rsc2)
             if not m2:
+                tprint(f"  SKIP {kod} | Portfoy bildirimi yok (disclosureIndex bulunamadi)")
                 return "skip:disclosureIndex yok"
 
             disc_idx = int(m2.group(1))
@@ -144,22 +174,27 @@ def isle_fon(kod, unvan, sleep_sn=1.0):
             attachments = (data3[0].get("attachments", []) if data3 else [])
             pdf_att = next((a for a in attachments if a.get("fileExtension", "").lower() == "pdf"), None)
             if not pdf_att:
+                tprint(f"  SKIP {kod} | PDF eki bulunamadi")
                 return "skip:PDF yok"
 
             # 4. PDF indir + parse
             r4 = client.get(f"{KAP}/tr/api/file/download/{pdf_att['objId']}", timeout=30)
             parsed = parse_pdf(r4.content, kod)
+            h = len(parsed.get("holdings", []))
+            if h == 0:
+                tprint(f"  SKIP {kod} | PDF parse bos (farkli format)")
+                return "skip:PDF parse bos"
             redis_yaz(kod, parsed)
             ok = inc_ok()
-            if ok % 25 == 0:
-                tprint(f"  [{ok} OK / {_hata} HATA / {_atlandi} atlandı]")
+            tprint(f"  OK   {kod} | {h} holding | toplam={ok}")
             return "ok"
 
     except Exception as e:
         inc_hata()
+        tprint(f"  HATA {kod} | {str(e)[:70]}")
         return f"hata:{str(e)[:60]}"
     finally:
-        time.sleep(sleep_sn)  # Worker basina rate-limit
+        time.sleep(sleep_sn)
 
 # ── Fon listesi ───────────────────────────────────────────────────────────────
 def load_fonlar():
@@ -172,8 +207,8 @@ def load_fonlar():
 
 # ── Ana ───────────────────────────────────────────────────────────────────────
 def main():
-    WORKERS = 5        # Paralel worker sayisi
-    SLEEP   = 1.2      # Worker basina istek arasi bekleme (KAP rate-limit)
+    WORKERS = 2        # Paralel worker sayisi (KAP rate-limit icin dusuk tut)
+    SLEEP   = 3.0      # Worker basina istek arasi bekleme — saniyede ~0.6 istek
 
     fonlar = load_fonlar()
     zaten  = sum(1 for k, _ in fonlar if redis_var_mi(k))

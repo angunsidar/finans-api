@@ -126,6 +126,7 @@ async def _warm_caches():
     for rk, val in redis_portfoy.items():
         if val:
             kod = rk.replace("finans:portfoy:", "")
+            val = portfoy._normalize_portfoy(val)
             portfoy._cache[kod] = (now, val)
             portfoy._stale[kod] = val
             loaded += 1
@@ -285,11 +286,11 @@ async def lifespan(app: FastAPI):
         )
         _scheduler.add_job(
             _portfoy_watchdog_job, "cron",
-            hour=11, minute=0, day_of_week="mon-fri",
+            hour=13, minute=30, day_of_week="mon-fri",
             id="portfoy_watchdog", replace_existing=True,
         )
         _scheduler.start()
-        _logger.info("APScheduler başladı: TEFAS 10:30, Portföy watchdog 11:00 (hafta içi)")
+        _logger.info("APScheduler başladı: TEFAS 10:30, Portföy watchdog 13:30 (hafta içi)")
         yield
         _scheduler.shutdown(wait=False)
     else:

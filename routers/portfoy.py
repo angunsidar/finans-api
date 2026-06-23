@@ -61,8 +61,27 @@ _SLUG_MAP: dict[str, str] = {
     "DBA": "dba-deniz-portfoy-altin-fonu",
     "TLY": "tly-tera-portfoy-birinci-serbest-fon",
     "MAC": "mac-marmara-capital-portfoy-hisse-senedi-tl-fonu-hisse-senedi-yogun-fon",
-    # Eski / gecersiz sluglar buradan kaldirildi (YAS, GAF, TKF, AKF, IPB, TTE, AFT)
-    # Kodu bilinmeyen fonlar icin fon_universe.json'dan otomatik slug uretilir
+    # Manuel çekilen fonlar — watchdog tarafından takip edilir (2026-06)
+    "AES": "aes-ak-portfoy-petrol-yabanci-byf-fon-sepeti-fonu",
+    "CPU": "cpu-aktif-portfoy-teknoloji-katilim-fonu",
+    "KLH": "klh-atlas-portfoy-katilim-hisse-senedi-serbest-fon-hisse-senedi-yogun-fon",
+    "DFI": "dfi-atlas-portfoy-serbest-fon",
+    "BMU": "bmu-bulls-portfoy-mutlak-getiri-hedefli-hisse-senedi-serbest-fon-hisse-senedi-yogun-fon",
+    "BVV": "bvv-bv-portfoy-teknoloji-degisken-fon",
+    "SNY": "sny-atlas-portfoy-sanayi-sektoru-hisse-senedi-serbest-fon-hisse-senedi-yogun-fon",
+    "BTK": "btk-bv-portfoy-teknoloji-katilim-fonu",
+    "SGT": "sgt-garanti-portfoy-siber-guvenlik-teknolojileri-degisken-fon",
+    "GUH": "guh-garanti-portfoy-yabanci-teknoloji-hisse-senedi-fonu",
+    "YIT": "yit-garanti-portfoy-yari-iletken-teknolojileri-degisken-fon",
+    "TTE": "tte-is-portfoy-bist-teknoloji-agirlik-sinirlamali-endeksi-hisse-senedi-tl-fonu-hisse-senedi-yogun-fon",
+    "IJC": "ijc-is-portfoy-yari-iletken-teknolojileri-degisken-fon",
+    "IJZ": "ijz-is-portfoy-siber-guvenlik-teknolojileri-degisken-fon",
+    "NTI": "nti-neo-portfoy-teknoloji-ve-inovasyon-degisken-fon",
+    "PHE": "phe-pusula-portfoy-hisse-senedi-fonu-hisse-senedi-yogun-fon",
+    "PBR": "pbr-pusula-portfoy-birinci-degisken-fon",
+    "DNK": "dnk-tacirler-portfoy-denge-katilim-serbest-fon",
+    "CPT": "cpt-rota-portfoy-cip-teknolojileri-degisken-fon",
+    "TFF": "tff-teb-portfoy-amerika-teknoloji-yabanci-byf-fon-sepeti-fonu",
 }
 
 # ── Cache (TTL 25 gün — ay içinde değişmez) ──────────────────────────────────
@@ -89,6 +108,30 @@ def _cache_set(kod: str, val: dict):
         pass
 
 
+def _normalize_portfoy(data: dict) -> dict:
+    """fetch_portfoy_local.py formatını (isim/oran) standart formata (kod/ftd_yuzde) çevir."""
+    holdings = data.get("holdings", [])
+    if not holdings:
+        return data
+    first = holdings[0]
+    if "isim" in first and "kod" not in first:
+        data["holdings"] = [
+            {
+                "kod": h.get("isim", ""),
+                "ftd_yuzde": h.get("oran"),
+                "tur": h.get("tur", "diger"),
+                "isin": h.get("isin"),
+                "unvan": _bist_name(h.get("isim", "")),
+            }
+            for h in holdings
+        ]
+    if "donem" not in data and "tarih" in data:
+        data["donem"] = data["tarih"]
+    if "kategori_ozeti" not in data:
+        data["kategori_ozeti"] = {}
+    return data
+
+
 # Watchdog — her fon için son bilinen disclosureIndex
 _stored_indexes: dict[str, int] = {}  # Redis'e de yazar, bu dict sadece memory hız için
 
@@ -113,7 +156,8 @@ def _set_stored_index(kod: str, idx: int):
     _stored_indexes[kod] = idx
     try:
         from redis_cache import rset
-        rset(f"finans:portfoy_idx:{kod}", {"disclosure_index": idx})
+        # 30 gün TTL — aylık yayın; 24s varsayılan TTL her sabah idx'i siliyordu
+        rset(f"finans:portfoy_idx:{kod}", {"disclosure_index": idx}, ttl=30 * 86_400)
     except Exception:
         pass
 
@@ -149,17 +193,28 @@ def watchdog_check(kod: str) -> bool:
         return False
 
 
-def watchdog_all() -> dict[str, bool]:
-    """Tüm izlenen fonları kontrol et. main.py scheduler tarafından çağrılır."""
+def watchdog_all(max_pdf: int = 5) -> dict[str, bool]:
+    """
+    Tüm izlenen fonları kontrol et. main.py scheduler tarafından çağrılır.
+    max_pdf: tek çalışmada indirilecek maksimum PDF sayısı (OOM koruması).
+    """
     results = {}
+    pdf_count = 0
     for kod in _SLUG_MAP:
-        results[kod] = watchdog_check(kod)
-        time.sleep(0.5)  # KAP rate-limit koruması
+        if pdf_count >= max_pdf:
+            results[kod] = False
+            continue
+        updated = watchdog_check(kod)
+        if updated:
+            pdf_count += 1
+        results[kod] = updated
+        time.sleep(2)  # KAP rate-limit + Render CPU nefes
     updated = [k for k, v in results.items() if v]
+    skipped = len(_SLUG_MAP) - len([k for k, v in results.items() if v is not None and k in _SLUG_MAP]) + len([k for k in _SLUG_MAP if results.get(k) is False and pdf_count >= max_pdf])
     if updated:
-        _logger.info(f"Portföy watchdog: {updated} güncellendi")
+        _logger.info(f"Portföy watchdog: {updated} güncellendi (PDF limit: {pdf_count}/{max_pdf})")
     else:
-        _logger.info("Portföy watchdog: değişiklik yok")
+        _logger.info(f"Portföy watchdog: değişiklik yok")
     return results
 
 
@@ -614,6 +669,7 @@ def _fetch_portfoy(kod: str, unvan: str | None = None) -> dict:
         from redis_cache import rget
         v = rget(f"finans:portfoy:{kod}")
         if v:
+            v = _normalize_portfoy(v)
             _cache[kod] = (time.time(), v)
             _stale[kod] = v
             return v
