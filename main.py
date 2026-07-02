@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, portfoy
+from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, portfoy, alarmlar
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     _APScheduler = AsyncIOScheduler
@@ -394,6 +394,7 @@ app.include_router(evren.router)
 app.include_router(gumus.router)
 app.include_router(fon.router)
 app.include_router(portfoy.router)
+app.include_router(alarmlar.router)
 
 
 # ─── Genel Endpoints ──────────────────────────────────────────────────────────
