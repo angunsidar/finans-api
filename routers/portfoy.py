@@ -193,7 +193,7 @@ def watchdog_check(kod: str) -> bool:
         return False
 
 
-def watchdog_all(max_pdf: int = 5) -> dict[str, bool]:
+def watchdog_all(max_pdf: int = 2) -> dict[str, bool]:
     """
     Tüm izlenen fonları kontrol et. main.py scheduler tarafından çağrılır.
     max_pdf: tek çalışmada indirilecek maksimum PDF sayısı (OOM koruması).
