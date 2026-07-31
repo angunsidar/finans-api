@@ -593,13 +593,13 @@ def _parse_holdings(text: str, result: dict):
         if isin_tur:
             current_kat = isin_tur
 
-        # Kod (ISIN öncesindeki ilk kelime)
+        # Kod (ISIN öncesindeki ilk kelime) — hisse kodları KAP PDF'inde ".E" ekiyle gelir: "MAVI.E"
         before_isin = line[:isin_m.start()].strip()
         tokens = before_isin.split()
         if tokens:
-            kod = tokens[0].upper()
+            kod = tokens[0].upper().split(".")[0]
             # Kod çok uzunsa (ISIN tekrarı) veya geçersizse isin kullan
-            if len(kod) > 12 or not kod.replace("-", "").isalnum():
+            if not kod or len(kod) > 12 or not kod.replace("-", "").isalnum():
                 kod = isin
         else:
             kod = isin
