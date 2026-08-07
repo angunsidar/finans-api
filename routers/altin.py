@@ -8,8 +8,6 @@ from __future__ import annotations
 import threading
 import time
 import traceback
-from datetime import datetime
-from zoneinfo import ZoneInfo
 import requests
 import yfinance as yf
 from fastapi import APIRouter, HTTPException, Query
@@ -225,97 +223,70 @@ def altin_bist():
             "borsa": "BIST", **veri}
 
 
-def _bist_acik() -> bool:
-    """BIST işlem saatleri: hafta içi 10:00–18:00 (İstanbul saati)."""
-    now = datetime.now(ZoneInfo("Europe/Istanbul"))
-    if now.weekday() >= 5:
-        return False
-    return 10 <= now.hour < 18
-
-
 def altin_tl_hesapla(force: bool = False) -> dict:
     """
     Altın TL hesabını yap ve Redis'e kaydet.
     force=False → Redis'te hazır sonuç varsa direkt döner (kullanıcı isteği için)
     force=True  → yeniden hesapla ve Redis'i güncelle (background worker için)
     """
-    # Redis'te hazır sonuç var mı? → direkt dön (gumus_tl mantığının aynısı)
     if not force:
         from redis_cache import rget
         cached = rget("finans:altin:tl")
         if cached:
             _stale["__tl__"] = cached
             return cached
-        # Stale fallback
         if "__tl__" in _stale:
             return _stale["__tl__"]
 
-    gram_tl: float | None = None
-    ons_tl: float | None = None
     ons_usd: float | None = None
+    ons_tl: float | None = None
     degisim_yuzde: float = 0.0
     tarih: str = ""
     kaynak: str = ""
     hatalar: list[str] = []
 
-    # 1. BIST açıksa GLDTR.IS — TRY/gram spot, BigPara ile aynı kaynak
-    if _bist_acik():
-        try:
-            gldtr = _fetch("GLDTR.IS")
-            if gldtr and gldtr.get("fiyat"):
-                gram_tl = float(gldtr["fiyat"])
-                ons_tl = round(gram_tl * 31.1035, 2)
-                degisim_yuzde = gldtr.get("degisim_yuzde", 0.0)
-                tarih = gldtr.get("tarih", "")
-                kaynak = "BIST GLDTR.IS (spot)"
-                try:
-                    usdtry_val = _get_usdtry()
-                    ons_usd = round(ons_tl / usdtry_val, 4)
-                except Exception:
-                    pass
-        except Exception as e:
-            hatalar.append(f"GLDTR.IS: {e}")
+    # 1. yfinance GC=F × USDTRY=X
+    try:
+        gold    = _fetch("GC=F")
+        usdtry  = _get_usdtry()
+        ons_usd = gold["fiyat"]
+        ons_tl  = round(ons_usd * usdtry, 2)
+        degisim_yuzde = gold["degisim_yuzde"]
+        tarih   = gold["tarih"]
+        kaynak  = "yfinance GC=F × USDTRY=X"
+    except Exception as e:
+        hatalar.append(f"yfinance: {e}")
 
-    # 2. BIST kapalı veya GLDTR.IS başarısız → GC=F × USDTRY
-    if gram_tl is None:
-        try:
-            gold = _fetch("GC=F")
-            usdtry_val = _get_usdtry()
-            ons_usd = gold["fiyat"]
-            ons_tl = round(ons_usd * usdtry_val, 2)
-            gram_tl = round(ons_tl / 31.1035, 2)
-            degisim_yuzde = gold.get("degisim_yuzde", 0.0)
-            tarih = gold.get("tarih", "")
-            kaynak = "yfinance GC=F × USDTRY=X"
-        except Exception as e:
-            hatalar.append(f"yfinance: {e}")
-
-    # 3. Coinbase fallback
-    if gram_tl is None:
+    # 2. Coinbase fallback
+    if ons_usd is None:
         cb, cb_err = _coinbase_xau()
         if cb:
             ons_usd = cb["usd_ons"]
-            ons_tl = round(cb["try_ons"], 2)
-            gram_tl = round(ons_tl / 31.1035, 2)
-            kaynak = "Coinbase XAU-USD/TRY"
+            ons_tl  = round(cb["try_ons"], 2)
+            kaynak  = "Coinbase XAU-USD/TRY"
         else:
             hatalar.append(cb_err)
 
-    if gram_tl is None:
+    if ons_usd is None or ons_usd == 0:
         if "__tl__" in _stale:
             return _stale["__tl__"]
         raise HTTPException(
             503,
             detail={"hata": "Altın verisi alınamadı", "detaylar": hatalar},
         )
+    if ons_tl is None or ons_tl == 0:
+        if "__tl__" in _stale:
+            return _stale["__tl__"]
+        raise HTTPException(503, detail={"hata": "USDTRY kuru alınamadı"})
 
-    usdtry_hesap = round(ons_tl / ons_usd, 4) if (ons_tl and ons_usd) else 0
+    gram_tl      = round(ons_tl / 31.1035, 2)
+    usdtry_hesap = round(ons_tl / ons_usd, 4) if ons_usd else 0
 
     result = {
-        "altin_usd_ons": round(ons_usd, 4) if ons_usd else None,
+        "altin_usd_ons": round(ons_usd, 4),
         "usd_try": usdtry_hesap,
-        "altin_tl_ons": round(ons_tl, 2) if ons_tl else None,
-        "altin_tl_gram": round(gram_tl, 2),
+        "altin_tl_ons": ons_tl,
+        "altin_tl_gram": gram_tl,
         "altin_22ayar_gram": round(gram_tl * 0.916, 2),
         "not": f"{kaynak} ile hesaplanmıştır",
         "tarih": tarih,
