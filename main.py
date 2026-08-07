@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, portfoy
+from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, portfoy, alarmlar
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     _APScheduler = AsyncIOScheduler
@@ -49,7 +49,7 @@ async def _warm_caches():
     # ── Adım 1: Redis'ten anında yükle ──────────────────────────────────────
     from redis_cache import rget_many, rget_prefix
 
-    altin_raw_keys = ["GC=F", "__cb_xau__"]
+    altin_raw_keys = ["GC=F", "GLDTR.IS", "__cb_xau__"]
     doviz_keys   = ["USDTRY=X", "EURTRY=X", "GBPTRY=X", "CHFTRY=X",
                     "JPYTRY=X", "AUDTRY=X", "CADTRY=X"]
     kripto_coins = kripto.WARM_COINS
@@ -144,14 +144,19 @@ async def _warm_caches():
 
     await asyncio.sleep(1)
 
-    # Altın futures (GC=F) + TL hesabı — USDTRY artık doviz cache'inden okunur
+    # Altın: GC=F (gece/hafta sonu fallback) + GLDTR.IS (BIST saatleri primary)
     try:
         altin._fetch("GC=F", force=True)
         _logger.info("Warm-up ✓ altin/GC=F")
     except Exception as e:
         _logger.warning(f"Warm-up ✗ altin/GC=F: {e}")
     try:
-        altin.warm_up_tl(force=True)  # GC=F × USDTRY → finans:altin:tl Redis'e
+        altin._fetch("GLDTR.IS", force=True)
+        _logger.info("Warm-up ✓ altin/GLDTR.IS")
+    except Exception as e:
+        _logger.warning(f"Warm-up ✗ altin/GLDTR.IS: {e}")
+    try:
+        altin.warm_up_tl(force=True)
         _logger.info("Warm-up ✓ altin/tl")
     except Exception as e:
         _logger.warning(f"Warm-up ✗ altin/tl: {e}")
@@ -189,6 +194,7 @@ async def _fetch_all():
     loop = asyncio.get_event_loop()
     results = await asyncio.gather(
         loop.run_in_executor(_bg_executor, lambda: altin._fetch("GC=F", force=True)),
+        loop.run_in_executor(_bg_executor, lambda: altin._fetch("GLDTR.IS", force=True)),
         loop.run_in_executor(_bg_executor, lambda: altin.warm_up_tl(force=True)),  # TL ön-hesap → Redis
         loop.run_in_executor(_bg_executor, kripto.warm_up),
         loop.run_in_executor(_bg_executor, doviz.warm_up),       # USDTRY dahil
@@ -198,7 +204,7 @@ async def _fetch_all():
         return_exceptions=True,
     )
     for name, r in zip(
-        ["altin/GC=F", "altin/tl", "kripto", "doviz", "gumus", "bist", "abd"], results
+        ["altin/GC=F", "altin/GLDTR.IS", "altin/tl", "kripto", "doviz", "gumus", "bist", "abd"], results
     ):
         if isinstance(r, Exception):
             _logger.warning(f"BG fetch ✗ {name}: {r}")
@@ -394,6 +400,7 @@ app.include_router(evren.router)
 app.include_router(gumus.router)
 app.include_router(fon.router)
 app.include_router(portfoy.router)
+app.include_router(alarmlar.router)
 
 
 # ─── Genel Endpoints ──────────────────────────────────────────────────────────
