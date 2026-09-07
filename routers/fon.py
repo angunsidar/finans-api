@@ -47,6 +47,44 @@ POPULER_FONLAR: dict[str, str] = {
     "ZGD": "Ziraat Portföy Altın Katılım BYF",
 }
 
+# ── Fon kodu → TEFAS/KAP slug eşlemesi ─────────────────────────────
+# Slug = "{kod}-{tefas-unvan-slug}"  (küçük harf, Türkçe karakter → latin)
+# main._tefas_daily_job POPULER_FONLAR dışındaki fon kodlarını buradan okur.
+_SLUG_MAP: dict[str, str] = {
+    # Guncel sluglar (TEFAS 2026-05)
+    "YKT": "ykt-yapi-kredi-portfoy-altin-fonu",
+    "GTA": "gta-garanti-portfoy-altin-fonu",
+    "TTA": "tta-is-portfoy-altin-fonu",
+    "AFO": "afo-ak-portfoy-altin-fonu",
+    "TCA": "tca-ziraat-portfoy-altin-katilim-fonu",
+    "HBF": "hbf-hsbc-portfoy-altin-fonu",
+    "GOL": "gol-garanti-portfoy-altin-katilim-fonu",
+    "DBA": "dba-deniz-portfoy-altin-fonu",
+    "TLY": "tly-tera-portfoy-birinci-serbest-fon",
+    "MAC": "mac-marmara-capital-portfoy-hisse-senedi-tl-fonu-hisse-senedi-yogun-fon",
+    # Manuel çekilen fonlar — watchdog tarafından takip edilir (2026-06)
+    "AES": "aes-ak-portfoy-petrol-yabanci-byf-fon-sepeti-fonu",
+    "CPU": "cpu-aktif-portfoy-teknoloji-katilim-fonu",
+    "KLH": "klh-atlas-portfoy-katilim-hisse-senedi-serbest-fon-hisse-senedi-yogun-fon",
+    "DFI": "dfi-atlas-portfoy-serbest-fon",
+    "BMU": "bmu-bulls-portfoy-mutlak-getiri-hedefli-hisse-senedi-serbest-fon-hisse-senedi-yogun-fon",
+    "BVV": "bvv-bv-portfoy-teknoloji-degisken-fon",
+    "SNY": "sny-atlas-portfoy-sanayi-sektoru-hisse-senedi-serbest-fon-hisse-senedi-yogun-fon",
+    "BTK": "btk-bv-portfoy-teknoloji-katilim-fonu",
+    "SGT": "sgt-garanti-portfoy-siber-guvenlik-teknolojileri-degisken-fon",
+    "GUH": "guh-garanti-portfoy-yabanci-teknoloji-hisse-senedi-fonu",
+    "YIT": "yit-garanti-portfoy-yari-iletken-teknolojileri-degisken-fon",
+    "TTE": "tte-is-portfoy-bist-teknoloji-agirlik-sinirlamali-endeksi-hisse-senedi-tl-fonu-hisse-senedi-yogun-fon",
+    "IJC": "ijc-is-portfoy-yari-iletken-teknolojileri-degisken-fon",
+    "IJZ": "ijz-is-portfoy-siber-guvenlik-teknolojileri-degisken-fon",
+    "NTI": "nti-neo-portfoy-teknoloji-ve-inovasyon-degisken-fon",
+    "PHE": "phe-pusula-portfoy-hisse-senedi-fonu-hisse-senedi-yogun-fon",
+    "PBR": "pbr-pusula-portfoy-birinci-degisken-fon",
+    "DNK": "dnk-tacirler-portfoy-denge-katilim-serbest-fon",
+    "CPT": "cpt-rota-portfoy-cip-teknolojileri-degisken-fon",
+    "TFF": "tff-teb-portfoy-amerika-teknoloji-yabanci-byf-fon-sepeti-fonu",
+}
+
 # ── Cache + stale fallback ────────────────────────────────────────────────────
 # TTL sadece güvenlik ağı — asıl tazelik kontrolü veri tarihi üzerinden yapılır
 _cache: dict[str, tuple[float, dict]] = {}

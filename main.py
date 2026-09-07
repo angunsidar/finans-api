@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, portfoy, alarmlar
+from routers import bist, kripto, altin, doviz, abd, evren, gumus, fon, alarmlar
 try:
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     _APScheduler = AsyncIOScheduler
@@ -121,16 +121,6 @@ async def _warm_caches():
             fon._stale[kod] = val
             loaded += 1
 
-    # Portföy holdings cache (finans:portfoy:*)
-    redis_portfoy = rget_prefix("finans:portfoy:")
-    for rk, val in redis_portfoy.items():
-        if val:
-            kod = rk.replace("finans:portfoy:", "")
-            val = portfoy._normalize_portfoy(val)
-            portfoy._cache[kod] = (now, val)
-            portfoy._stale[kod] = val
-            loaded += 1
-
     _logger.info(f"Redis pre-load: {loaded} key yüklendi → _cache + _stale dolu, ilk istek <10ms")
 
     await asyncio.sleep(2)  # Kısa bekleme sonrası taze veri çek
@@ -226,8 +216,7 @@ def _tefas_daily_job():
     Her iş günü 10:30'da çalışır.
     SLUG_MAP'teki tüm fonların TEFAS fiyatını çekip Redis'e yazar.
     """
-    from routers.portfoy import _SLUG_MAP
-    all_codes = list(fon.POPULER_FONLAR.keys()) + [k for k in _SLUG_MAP if k not in fon.POPULER_FONLAR]
+    all_codes = list(fon.POPULER_FONLAR.keys()) + [k for k in fon._SLUG_MAP if k not in fon.POPULER_FONLAR]
     basarili = []
     for kod in all_codes:
         try:
@@ -237,20 +226,6 @@ def _tefas_daily_job():
         except Exception as e:
             _logger.warning(f"TEFAS daily job hata ({kod}): {e}")
     _logger.info(f"TEFAS daily job ✓ {len(basarili)}/{len(all_codes)} fon güncellendi")
-
-
-def _portfoy_watchdog_job():
-    """
-    Her iş günü 11:00'de çalışır.
-    SLUG_MAP'teki fonların disclosureIndex'ini kontrol eder.
-    Değişiklik varsa PDF'i çekip cache'e yazar.
-    """
-    try:
-        results = portfoy.watchdog_all()
-        updated = [k for k, v in results.items() if v]
-        _logger.info(f"Portföy watchdog job tamamlandı. Güncellenen: {updated or 'yok'}")
-    except Exception as e:
-        _logger.error(f"Portföy watchdog job genel hata: {e}")
 
 
 def _temettü_monthly_job():
@@ -284,13 +259,8 @@ async def lifespan(app: FastAPI):
             hour=10, minute=30, day_of_week="mon-fri",
             id="tefas_daily", replace_existing=True,
         )
-        _scheduler.add_job(
-            _portfoy_watchdog_job, "cron",
-            hour=13, minute=30, day_of_week="mon-fri",
-            id="portfoy_watchdog", replace_existing=True,
-        )
         _scheduler.start()
-        _logger.info("APScheduler başladı: TEFAS 10:30, Portföy watchdog 13:30 (hafta içi)")
+        _logger.info("APScheduler başladı: TEFAS 10:30 (hafta içi)")
         yield
         _scheduler.shutdown(wait=False)
     else:
@@ -393,7 +363,6 @@ app.include_router(abd.router)
 app.include_router(evren.router)
 app.include_router(gumus.router)
 app.include_router(fon.router)
-app.include_router(portfoy.router)
 app.include_router(alarmlar.router)
 
 
